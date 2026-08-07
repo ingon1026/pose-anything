@@ -19,13 +19,16 @@ PROMPT_ALIASES = {
 
 class Sam3Detector:
     def __init__(self, model_id="facebook/sam3", device=None, threshold=0.4,
-                 mask_threshold=0.5):
+                 mask_threshold=0.5, max_per_prompt=1):
         from transformers import Sam3Model, Sam3Processor
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = Sam3Model.from_pretrained(model_id).to(self.device).eval()
         self.processor = Sam3Processor.from_pretrained(model_id)
         self.threshold = threshold
         self.mask_threshold = mask_threshold
+        # 프롬프트당 유지할 인스턴스 수. open-vocab은 일치하는 모든 인스턴스를
+        # 찾으므로, 기본은 최고 score 1개만 남긴다. 0 = 제한 없음.
+        self.max_per_prompt = max_per_prompt
 
     @torch.no_grad()
     def detect(self, rgb: np.ndarray, prompts: list[str]) -> list[dict]:
@@ -47,12 +50,15 @@ class Sam3Detector:
             results = self.processor.post_process_instance_segmentation(
                 outputs, threshold=self.threshold,
                 mask_threshold=self.mask_threshold, target_sizes=target_sizes)[0]
-            for mask, box, score in zip(results["masks"], results["boxes"],
-                                        results["scores"]):
-                detections.append({
-                    "label": label,
-                    "mask": mask.cpu().numpy().astype(bool),
-                    "box": box.cpu().numpy().astype(float),
-                    "score": float(score),
-                })
+            found = [{
+                "label": label,
+                "mask": mask.cpu().numpy().astype(bool),
+                "box": box.cpu().numpy().astype(float),
+                "score": float(score),
+            } for mask, box, score in zip(results["masks"], results["boxes"],
+                                          results["scores"])]
+            found.sort(key=lambda d: -d["score"])
+            if self.max_per_prompt > 0:
+                found = found[:self.max_per_prompt]
+            detections.extend(found)
         return detections
