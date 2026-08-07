@@ -1,0 +1,99 @@
+"""Greedy 2D-box IoU tracker with EMA smoothing and OBB axis continuity."""
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from .geometry import ObbResult, match_axes, smooth_rotation
+
+
+def box_iou(a, b):
+    """IoU of xyxy boxes."""
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter + 1e-9)
+
+
+@dataclass
+class Track:
+    track_id: int
+    label: str
+    box: np.ndarray
+    score: float
+    obb: ObbResult | None = None
+    missed: int = 0
+    flip_count: int = 0
+    age: int = 0
+    _prev_rpy: np.ndarray | None = field(default=None, repr=False)
+
+    def update_obb(self, obb: ObbResult | None, ema=0.4, rot_alpha=0.5):
+        if obb is None:
+            return
+        if self.obb is None:
+            self.obb = obb
+        else:
+            R, ext = match_axes(obb.R, obb.extent, self.obb.R)
+            # ponytail: flip metric = >45deg jump of first axis after matching
+            if np.dot(R[:, 0], self.obb.R[:, 0]) < np.cos(np.radians(45)):
+                self.flip_count += 1
+            self.obb = ObbResult(
+                center=ema * obb.center + (1 - ema) * self.obb.center,
+                extent=ema * ext + (1 - ema) * self.obb.extent,
+                R=smooth_rotation(self.obb.R, R, rot_alpha),
+                num_points=obb.num_points,
+            )
+
+
+class IouTracker:
+    def __init__(self, iou_threshold=0.3, max_missed=5):
+        self.iou_threshold = iou_threshold
+        self.max_missed = max_missed
+        self.tracks: list[Track] = []
+        self._next_id = 1
+
+    def reset(self):
+        self.tracks = []
+        self._next_id = 1
+
+    def update(self, detections):
+        """detections: list of dicts with keys label, box (xyxy), score.
+
+        Returns list of (track, detection) pairs for this frame.
+        Matching is restricted to same-label tracks.
+        """
+        pairs = []
+        candidates = [
+            (box_iou(t.box, d["box"]), ti, di)
+            for ti, t in enumerate(self.tracks)
+            for di, d in enumerate(detections)
+            if t.label == d["label"]
+        ]
+        used_t, used_d = set(), set()
+        for iou, ti, di in sorted(candidates, key=lambda c: -c[0]):
+            if iou < self.iou_threshold or ti in used_t or di in used_d:
+                continue
+            used_t.add(ti)
+            used_d.add(di)
+            t = self.tracks[ti]
+            t.box = np.asarray(detections[di]["box"], dtype=float)
+            t.score = detections[di]["score"]
+            t.missed = 0
+            t.age += 1
+            pairs.append((t, detections[di]))
+
+        for di, d in enumerate(detections):
+            if di in used_d:
+                continue
+            t = Track(self._next_id, d["label"], np.asarray(d["box"], dtype=float),
+                      d["score"])
+            self._next_id += 1
+            self.tracks.append(t)
+            pairs.append((t, d))
+
+        for ti, t in enumerate(self.tracks):
+            if ti not in used_t and t not in [p[0] for p in pairs]:
+                t.missed += 1
+        self.tracks = [t for t in self.tracks if t.missed <= self.max_missed]
+        return pairs

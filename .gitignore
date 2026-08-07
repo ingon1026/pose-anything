@@ -1,0 +1,10 @@
+bags/
+bags.tar.gz
+output/
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.mp4
+*.Zone.Identifier
