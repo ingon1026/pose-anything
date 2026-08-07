@@ -61,8 +61,10 @@ else
     kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -5 "$LOG"; exit 1; }
     sleep 2
   done
-  echo ">> 준비 완료, bag 재생 시작"
-  echo ">> 다른 터미널에서 확인: ros2 topic echo /perception/detections  또는 rviz2"
+  rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
+  RVIZ_PID=$!
+  trap 'kill $NODE_PID $RVIZ_PID 2>/dev/null' EXIT
+  echo ">> 준비 완료 — RViz 창에서 디버그 영상(Image 패널)과 3D 박스(MarkerArray) 확인"
   ros2 bag play "$BAG" > /dev/null 2>&1
   echo ">> bag 재생 끝. 결과 CSV: output/ros_result.csv (종료: Enter)"
   read -r

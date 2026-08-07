@@ -11,6 +11,7 @@ setup(
          ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/launch", ["launch/perception.launch.py"]),
+        ("share/" + package_name + "/rviz", ["rviz/perception.rviz"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
