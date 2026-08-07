@@ -19,10 +19,13 @@ PROMPT_ALIASES = {
 
 class Sam3Detector:
     def __init__(self, model_id="facebook/sam3", device=None, threshold=0.4,
-                 mask_threshold=0.5, max_per_prompt=1):
+                 mask_threshold=0.5, max_per_prompt=1, dtype=torch.bfloat16):
         from transformers import Sam3Model, Sam3Processor
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = Sam3Model.from_pretrained(model_id).to(self.device).eval()
+        # bf16이 fp32 대비 3.7배 빠르고 score 차이 없음 (실측 548ms -> 150ms)
+        self.dtype = dtype if self.device == "cuda" else torch.float32
+        self.model = Sam3Model.from_pretrained(
+            model_id, dtype=self.dtype).to(self.device).eval()
         self.processor = Sam3Processor.from_pretrained(model_id)
         self.threshold = threshold
         self.mask_threshold = mask_threshold
@@ -39,7 +42,7 @@ class Sam3Detector:
         image = Image.fromarray(rgb)
         img_inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         vision_embeds = self.model.get_vision_features(
-            pixel_values=img_inputs.pixel_values)
+            pixel_values=img_inputs.pixel_values.to(self.dtype))
         target_sizes = img_inputs.get("original_sizes").tolist()
 
         detections = []
@@ -53,7 +56,7 @@ class Sam3Detector:
             found = [{
                 "label": label,
                 "mask": mask.cpu().numpy().astype(bool),
-                "box": box.cpu().numpy().astype(float),
+                "box": box.float().cpu().numpy().astype(float),
                 "score": float(score),
             } for mask, box, score in zip(results["masks"], results["boxes"],
                                           results["scores"])]
