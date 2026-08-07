@@ -91,6 +91,7 @@ def main():
     ap.add_argument("--out", default="output")
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--threshold", type=float, default=0.4)
+    ap.add_argument("--show", action="store_true", help="처리 중 오버레이 창 표시")
     args = ap.parse_args()
 
     from roboworld_perception.overlay import draw_objects
@@ -125,6 +126,12 @@ def main():
                                          cv2.VideoWriter_fourcc(*"mp4v"), 15,
                                          (bgr.shape[1], bgr.shape[0]))
             writer.write(bgr)
+            if args.show:
+                try:
+                    cv2.imshow("roboworld perception", bgr)
+                    cv2.waitKey(1)
+                except cv2.error:
+                    args.show = False  # 디스플레이 없는 환경이면 창 없이 계속
             n += 1
             for o in objects:
                 if o.obb is None:
