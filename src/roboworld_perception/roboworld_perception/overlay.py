@@ -1,6 +1,11 @@
 """OpenCV debug rendering: masks, projected 3D OBB, local axes, labels."""
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+# cv2.putText cannot render Korean labels; use PIL with a CJK font.
+_FONT = ImageFont.truetype(
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 15)
 
 PALETTE = [(66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53),
            (171, 71, 188), (0, 172, 193), (255, 112, 67), (124, 179, 66)]
@@ -17,6 +22,7 @@ def _project(points_3d, K):
 
 def draw_objects(bgr, objects, K):
     """objects: list of pipeline.TrackedObject. Draws in place, returns bgr."""
+    texts = []
     for obj in objects:
         color = PALETTE[obj.track_id % len(PALETTE)]
 
@@ -51,9 +57,14 @@ def draw_objects(bgr, objects, K):
             lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
                       f"whd=({w:.3f},{d:.3f},{h:.3f})m",
                       f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
-        for i, text in enumerate(lines):
-            cv2.putText(bgr, text, (x1, max(15, y1 - 8 - 16 * (len(lines) - 1 - i))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(bgr, text, (x1, max(15, y1 - 8 - 16 * (len(lines) - 1 - i))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        texts.append((x1, max(2, y1 - 8 - 17 * len(lines)), lines))
+
+    if texts:
+        pil = Image.fromarray(bgr[:, :, ::-1])
+        draw = ImageDraw.Draw(pil)
+        for x, y, lines in texts:
+            for i, line in enumerate(lines):
+                draw.text((x, y + 17 * i), line, font=_FONT, fill=(255, 255, 255),
+                          stroke_width=2, stroke_fill=(0, 0, 0))
+        bgr[:] = np.asarray(pil)[:, :, ::-1]
     return bgr

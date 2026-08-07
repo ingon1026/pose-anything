@@ -5,9 +5,15 @@ from PIL import Image
 
 # ponytail: SAM3 text encoder is English CLIP; map Korean prompts here.
 PROMPT_ALIASES = {
-    "물통": "water bottle",
+    "물통": "thermos",  # 초록 보온병: "water bottle"은 0.3~0.45로 불안정, thermos는 ~0.9
     "마우스": "computer mouse",
     "필통": "pencil case",
+    "노트북": "laptop",
+    "책": "book",
+    "스마트폰": "smartphone",
+    "장갑": "glove",
+    "천": "white cloth",
+    "블록": "pink foam block",
 }
 
 

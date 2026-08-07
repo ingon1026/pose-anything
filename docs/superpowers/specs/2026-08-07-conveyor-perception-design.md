@@ -16,7 +16,8 @@ rosbag(test2/test3)과 D455 실시간 입력 모두 지원. CSV로 프레임별 
 - **추적**: 프레임별 SAM3 텍스트 검출 + 2D box IoU greedy 매칭 트래커 (경량, ROS 스트리밍 친화)
 - **Docker**: 이번 범위에서 제외 (네이티브 WSL2 검증 후 별도 단계)
 - **Python 환경**: 시스템 python3.12 (torch 2.10+cu128 기설치, rclpy와 동일 인터프리터)
-- **한국어 프롬프트**: SAM3 텍스트 인코더는 영어 기반 → `물통→water bottle` 별칭 테이블로 변환
+- **한국어 프롬프트**: SAM3 텍스트 인코더는 영어 기반 → `물통→thermos` 등 별칭 테이블로 변환
+  (프롬프트 단어에 따라 score가 2배 이상 차이남: water bottle 0.45 vs thermos 0.9 — 불안정하면 threshold보다 단어를 먼저 교체)
 
 ## 데이터 (bag 실측)
 
