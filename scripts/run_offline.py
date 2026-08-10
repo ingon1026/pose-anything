@@ -125,14 +125,17 @@ def main():
                      "flips", "proc_ms"])
         t_start = time.perf_counter()
         n = 0
+        stamps = []
+        tmp_path = out_dir / f"{tag}.tmp.mp4"
         for stamp, rgb, depth, K in read_bag(args.bag, args.max_frames):
             t0 = time.perf_counter()
             objects = pipeline.process(rgb, depth, K, prompts)
             proc_ms = (time.perf_counter() - t0) * 1000
             bgr = draw_objects(rgb[:, :, ::-1].copy(), objects, K)
+            stamps.append(stamp)
             if writer is None:
-                writer = cv2.VideoWriter(str(out_dir / f"{tag}.mp4"),
-                                         cv2.VideoWriter_fourcc(*"mp4v"), 15,
+                writer = cv2.VideoWriter(str(tmp_path),
+                                         cv2.VideoWriter_fourcc(*"mp4v"), 30,
                                          (bgr.shape[1], bgr.shape[0]))
             writer.write(bgr)
             if args.show:
@@ -160,6 +163,22 @@ def main():
         total = time.perf_counter() - t_start
     if writer:
         writer.release()
+        # x1 재생 보장: 전체 구간 평균 fps로 재인코딩 (카메라 30fps 설정이지만
+        # 녹화 드랍으로 실제 ~18fps인 bag에서 프레임 간격 기반 추정은 가속됨)
+        fps = (len(stamps) - 1) / max(stamps[-1] - stamps[0], 1e-3) if len(stamps) > 1 else 15
+        cap = cv2.VideoCapture(str(tmp_path))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        out = cv2.VideoWriter(str(out_dir / f"{tag}.mp4"),
+                              cv2.VideoWriter_fourcc(*"mp4v"), round(fps, 2), (w, h))
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            out.write(frame)
+        cap.release()
+        out.release()
+        tmp_path.unlink()
     print(f"\n{n} frames in {total:.1f}s -> {n / max(total, 1e-9):.2f} FPS")
     print(f"video: {out_dir / f'{tag}.mp4'}\ncsv:   {csv_path}")
     summarize(rows)
