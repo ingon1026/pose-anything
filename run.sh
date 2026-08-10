@@ -1,71 +1,107 @@
 #!/bin/bash
-# 대화형 실행: 데이터/물체/모드를 번호로 고르면 알아서 실행한다.
+# 대화형:   ./run.sh
+# 비대화식: ./run.sh --source live --prompts "thermos" [--mode ros]
+#           ./run.sh --source bags/test3 --prompts "책,장갑" --mode offline [--threshold 0.4]
 cd "$(dirname "$0")"
 
-echo "=== 컨베이어 물체 인식 실행 ==="
-echo
-echo "어떤 영상으로 하시겠습니까?"
-echo "  1) test2 — 컨베이어 정지, 물체 4종 (검출 품질 확인)"
-echo "  2) test3 — 컨베이어 이동, 물체 3종 (추적 확인)"
-read -rp "번호 선택 [1-2]: " bag_sel
-case "$bag_sel" in
-  1) BAG=bags/test2 ;;
-  2) BAG=bags/test3 ;;
-  *) echo "1 또는 2를 입력하세요."; exit 1 ;;
-esac
-
-echo
-echo "감지할 물체를 고르세요 (여러 개면 공백으로 구분, 예: 1 3 4)"
-NAMES=(물통 노트북 책 스마트폰 장갑 블록)
-for i in "${!NAMES[@]}"; do echo "  $((i+1))) ${NAMES[$i]}"; done
-echo "  7) 직접 입력"
-read -rp "번호 선택: " -a obj_sel
-PROMPTS=()
-for s in "${obj_sel[@]}"; do
-  if [ "$s" = "7" ]; then
-    read -rp "물체 이름 입력 (쉼표 구분): " custom
-    PROMPTS+=("$custom")
-  elif [ "$s" -ge 1 ] 2>/dev/null && [ "$s" -le 6 ]; then
-    PROMPTS+=("${NAMES[$((s-1))]}")
-  else
-    echo "잘못된 번호: $s"; exit 1
-  fi
+SOURCE="" PROMPTS="" MODE="" THRESHOLD=0.4
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source)    SOURCE="$2"; shift 2 ;;
+    --prompts)   PROMPTS="$2"; shift 2 ;;
+    --mode)      MODE="$2"; shift 2 ;;
+    --threshold) THRESHOLD="$2"; shift 2 ;;
+    *) echo "알 수 없는 인자: $1  (--source --prompts --mode --threshold)"; exit 1 ;;
+  esac
 done
-PROMPTS_STR=$(IFS=,; echo "${PROMPTS[*]}")
-[ -z "$PROMPTS_STR" ] && { echo "물체를 최소 1개 선택하세요."; exit 1; }
 
-echo
-echo "실행 방식을 고르세요:"
-echo "  1) 간단 — 결과 영상(mp4)과 CSV 생성, 처리 중 화면 표시 (추천)"
-echo "  2) ROS — 노드 실행 + bag 재생, 토픽으로 발행 (RViz 연동용)"
-read -rp "번호 선택 [1-2]: " mode_sel
-
-echo
-echo ">> 데이터: $BAG | 물체: $PROMPTS_STR"
-
-if [ "${DRY_RUN:-0}" = "1" ]; then
-  echo "[dry-run] mode=$mode_sel bag=$BAG prompts=$PROMPTS_STR"; exit 0
+# --- 입력 소스 ---
+if [ -z "$SOURCE" ]; then
+  echo "=== 컨베이어 물체 인식 실행 ==="
+  echo
+  echo "입력 소스를 고르세요:"
+  mapfile -t BAGS < <(find . -maxdepth 3 -name metadata.yaml -printf '%h\n' 2>/dev/null | sed 's|^\./||' | sort)
+  i=1
+  for b in "${BAGS[@]}"; do echo "  $i) bag: $b"; i=$((i+1)); done
+  echo "  L) 실시간 카메라 (RealSense D455)"
+  echo "  P) bag 경로 직접 입력"
+  read -rp "선택: " sel
+  case "$sel" in
+    [Ll]) SOURCE=live ;;
+    [Pp]) read -rp "bag 경로: " SOURCE ;;
+    *) SOURCE="${BAGS[$((sel-1))]:-}"
+       [ -z "$SOURCE" ] && { echo "잘못된 선택"; exit 1; } ;;
+  esac
+fi
+if [ "$SOURCE" != "live" ] && [ ! -f "$SOURCE/metadata.yaml" ]; then
+  echo "bag을 찾을 수 없음: $SOURCE (metadata.yaml 없음)"; exit 1
 fi
 
-if [ "$mode_sel" = "1" ]; then
-  python3 scripts/run_offline.py --bag "$BAG" --prompts "$PROMPTS_STR" --show
+# --- 물체 (자유 텍스트) ---
+if [ -z "$PROMPTS" ]; then
+  KNOWN=$(awk '/^PROMPT_ALIASES/,/^}/' \
+    src/roboworld_perception/roboworld_perception/sam3_detector.py \
+    | sed -n 's/^\s*"\([^"]*\)".*/\1/p' | paste -sd, -)
+  echo
+  echo "감지할 물체를 입력하세요 (쉼표 구분)"
+  echo "  한글 자동 변환: $KNOWN"
+  echo "  그 외 물체는 영어로 (예: red box, screwdriver)"
+  read -rp "물체: " PROMPTS
+fi
+[ -z "$PROMPTS" ] && { echo "물체를 최소 1개 입력하세요"; exit 1; }
+
+# --- 모드 ---
+[ "$SOURCE" = "live" ] && MODE=ros  # 실시간은 ROS 모드 고정
+if [ -z "$MODE" ]; then
+  echo
+  echo "실행 방식을 고르세요:"
+  echo "  1) 간단 — 결과 영상(mp4)과 CSV 생성, 처리 중 화면 표시 (추천)"
+  echo "  2) ROS — 노드 실행 + RViz, 토픽으로 발행"
+  read -rp "번호 선택 [1-2]: " m
+  if [ "$m" = "2" ]; then MODE=ros; else MODE=offline; fi
+fi
+
+echo
+echo ">> 소스: $SOURCE | 물체: $PROMPTS | 모드: $MODE | threshold: $THRESHOLD"
+[ "${DRY_RUN:-0}" = "1" ] && { echo "[dry-run] source=$SOURCE prompts=$PROMPTS mode=$MODE"; exit 0; }
+mkdir -p output
+
+if [ "$MODE" = "offline" ]; then
+  python3 scripts/run_offline.py --bag "$SOURCE" --prompts "$PROMPTS" \
+    --threshold "$THRESHOLD" --show
+  exit
+fi
+
+source install/setup.bash
+PIDS=()
+trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
+
+if [ "$SOURCE" = "live" ]; then
+  echo ">> RealSense 카메라 시작..."
+  ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
+  PIDS+=($!)
+fi
+
+LOG=$(mktemp)
+echo ">> 노드 시작 (SAM3 로딩 ~40초)..."
+ros2 run roboworld_perception perception_node --ros-args \
+  -p prompts:="$PROMPTS" -p score_threshold:="$THRESHOLD" \
+  -p csv_path:=output/ros_result.csv > "$LOG" 2>&1 &
+NODE_PID=$!
+PIDS+=($NODE_PID)
+until grep -q "SAM3 ready" "$LOG"; do
+  kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -5 "$LOG"; exit 1; }
+  sleep 2
+done
+rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
+PIDS+=($!)
+echo ">> 준비 완료 — RViz에서 디버그 영상(Image)과 3D 박스(MarkerArray) 확인"
+
+if [ "$SOURCE" = "live" ]; then
+  echo ">> 실시간 실행 중 (종료: Ctrl+C)"
+  wait $NODE_PID
 else
-  source install/setup.bash
-  LOG=$(mktemp)
-  echo ">> 노드 시작 (SAM3 로딩 ~40초)..."
-  ros2 run roboworld_perception perception_node --ros-args \
-    -p prompts:="$PROMPTS_STR" -p csv_path:=output/ros_result.csv > "$LOG" 2>&1 &
-  NODE_PID=$!
-  trap 'kill $NODE_PID 2>/dev/null' EXIT
-  until grep -q "SAM3 ready" "$LOG"; do
-    kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -5 "$LOG"; exit 1; }
-    sleep 2
-  done
-  rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
-  RVIZ_PID=$!
-  trap 'kill $NODE_PID $RVIZ_PID 2>/dev/null' EXIT
-  echo ">> 준비 완료 — RViz 창에서 디버그 영상(Image 패널)과 3D 박스(MarkerArray) 확인"
-  ros2 bag play "$BAG" > /dev/null 2>&1
+  ros2 bag play "$SOURCE" > /dev/null 2>&1
   echo ">> bag 재생 끝. 결과 CSV: output/ros_result.csv (종료: Enter)"
   read -r
 fi
