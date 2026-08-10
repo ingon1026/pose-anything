@@ -20,6 +20,15 @@ def _project(points_3d, K):
     return (p[:, :2] / p[:, 2:3]).astype(int)
 
 
+def draw_status(bgr, text):
+    """좌상단 상태 표시줄 (ASCII 전용, 처리 상태 확인용)."""
+    cv2.putText(bgr, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(bgr, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    return bgr
+
+
 def draw_objects(bgr, objects, K):
     """objects: list of pipeline.TrackedObject. Draws in place, returns bgr."""
     texts = []

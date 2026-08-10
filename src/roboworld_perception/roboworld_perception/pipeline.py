@@ -65,6 +65,7 @@ class PerceptionPipeline:
         self.detect_interval = max(1, detect_interval)
         self._frame_idx = 0
         self._prev_gray = None
+        self.last_was_keyframe = False  # 상태 표시용
 
     def reset(self):
         self.tracker.reset()
@@ -74,6 +75,7 @@ class PerceptionPipeline:
     def process(self, rgb, depth, K, prompts) -> list[TrackedObject]:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         keyframe = self._frame_idx % self.detect_interval == 0
+        self.last_was_keyframe = keyframe or self._prev_gray is None
         self._frame_idx += 1
 
         if keyframe or self._prev_gray is None:

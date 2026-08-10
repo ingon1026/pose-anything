@@ -100,7 +100,7 @@ def main():
                     help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
     args = ap.parse_args()
 
-    from roboworld_perception.overlay import draw_objects
+    from roboworld_perception.overlay import draw_objects, draw_status
     from roboworld_perception.pipeline import PerceptionPipeline
     from roboworld_perception.sam3_detector import Sam3Detector
 
@@ -132,6 +132,9 @@ def main():
             objects = pipeline.process(rgb, depth, K, prompts)
             proc_ms = (time.perf_counter() - t0) * 1000
             bgr = draw_objects(rgb[:, :, ::-1].copy(), objects, K)
+            mode = "KEY" if pipeline.last_was_keyframe else "track"
+            draw_status(bgr, f"{1000 / max(proc_ms, 1e-3):4.1f} FPS | {mode} | "
+                             f"objects={len(objects)}")
             stamps.append(stamp)
             if writer is None:
                 writer = cv2.VideoWriter(str(tmp_path),

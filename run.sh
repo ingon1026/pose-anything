@@ -83,10 +83,11 @@ if [ "$SOURCE" = "live" ]; then
 fi
 
 LOG=$(mktemp)
+CSV="output/ros_$(date +%Y%m%d_%H%M%S).csv"
 echo ">> 노드 시작 (SAM3 로딩 ~40초)..."
 ros2 run roboworld_perception perception_node --ros-args \
   -p prompts:="$PROMPTS" -p score_threshold:="$THRESHOLD" \
-  -p csv_path:=output/ros_result.csv > "$LOG" 2>&1 &
+  -p display:=true -p csv_path:="$CSV" > "$LOG" 2>&1 &
 NODE_PID=$!
 PIDS+=($NODE_PID)
 until grep -q "SAM3 ready" "$LOG"; do
@@ -95,13 +96,13 @@ until grep -q "SAM3 ready" "$LOG"; do
 done
 rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
 PIDS+=($!)
-echo ">> 준비 완료 — RViz에서 디버그 영상(Image)과 3D 박스(MarkerArray) 확인"
+echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"
 
 if [ "$SOURCE" = "live" ]; then
   echo ">> 실시간 실행 중 (종료: Ctrl+C)"
   wait $NODE_PID
 else
   ros2 bag play "$SOURCE" > /dev/null 2>&1
-  echo ">> bag 재생 끝. 결과 CSV: output/ros_result.csv (종료: Enter)"
+  echo ">> bag 재생 끝. 결과 CSV: $CSV (종료: Enter)"
   read -r
 fi

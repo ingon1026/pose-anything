@@ -18,9 +18,11 @@ from vision_msgs.msg import (Detection3D, Detection3DArray,
                              ObjectHypothesisWithPose)
 from visualization_msgs.msg import Marker, MarkerArray
 
-from .overlay import PALETTE, draw_objects
+import cv2
+
+from .overlay import PALETTE, draw_objects, draw_status
 from .pipeline import PerceptionPipeline
-from .sam3_detector import Sam3Detector
+from .sam3_detector import PROMPT_ALIASES, Sam3Detector
 
 # ponytail: manual Image<->numpy instead of cv_bridge (its binary is built
 # against numpy 1.x and may crash under the numpy 2.x in this env)
@@ -56,6 +58,7 @@ class PerceptionNode(Node):
         self.declare_parameter("score_threshold", 0.4)
         self.declare_parameter("max_per_prompt", 1)
         self.declare_parameter("detect_interval", 5)
+        self.declare_parameter("display", False)  # 전체 크기 디버그 창 표시
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic",
                                "/camera/camera/aligned_depth_to_color/image_raw")
@@ -75,6 +78,8 @@ class PerceptionNode(Node):
         self.K = None
         self.frame_id = "camera_color_optical_frame"
         self._busy = False
+        self._display = self.get_parameter("display").value
+        self._fps_ema = 0.0
 
         self.pub_det = self.create_publisher(Detection3DArray,
                                              "/perception/detections", 10)
@@ -194,7 +199,9 @@ class PerceptionNode(Node):
                 o.center + np.array([0, -o.extent[1] / 2 - 0.03, 0])
             text.scale.z = 0.03
             text.color.r = text.color.g = text.color.b = text.color.a = 1.0
-            text.text = f"{obj.label}#{obj.track_id} {o.distance:.2f}m"
+            # RViz는 한글 글리프를 렌더링하지 못하므로 마커 텍스트는 영어 별칭 사용
+            en = PROMPT_ALIASES.get(obj.label, obj.label)
+            text.text = f"{en}#{obj.track_id} {o.distance:.2f}m"
             markers.markers.append(text)
 
             if self.csv_writer:
@@ -208,9 +215,22 @@ class PerceptionNode(Node):
 
         self.pub_det.publish(det_array)
         self.pub_markers.publish(markers)
-        debug = np_to_imgmsg(draw_objects(bgr, objects, self.K))
+
+        inst_fps = 1000.0 / max(proc_ms, 1e-3)
+        self._fps_ema = inst_fps if self._fps_ema == 0 else \
+            0.9 * self._fps_ema + 0.1 * inst_fps
+        draw_objects(bgr, objects, self.K)
+        mode = "KEY" if self.pipeline.last_was_keyframe else "track"
+        draw_status(bgr, f"{self._fps_ema:4.1f} FPS | {mode} | objects={len(objects)}")
+        debug = np_to_imgmsg(bgr)
         debug.header = det_array.header
         self.pub_debug.publish(debug)
+        if self._display:
+            try:
+                cv2.imshow("roboworld perception", bgr)
+                cv2.waitKey(1)
+            except cv2.error:
+                self._display = False  # 디스플레이 없는 환경
 
 
 def main(args=None):
