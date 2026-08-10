@@ -66,7 +66,10 @@ def draw_objects(bgr, objects, K):
             lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
                       f"whd=({w:.3f},{d:.3f},{h:.3f})m",
                       f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
-        texts.append((x1, max(2, y1 - 8 - 17 * len(lines)), lines))
+        y_top = y1 - 8 - 17 * len(lines)
+        if y_top < 2:  # 박스가 화면 상단에 붙으면 라벨을 박스 아래로
+            y_top = min(int(obj.box[3]) + 6, bgr.shape[0] - 17 * len(lines) - 2)
+        texts.append((x1, y_top, lines))
 
     if texts:
         pil = Image.fromarray(bgr[:, :, ::-1])

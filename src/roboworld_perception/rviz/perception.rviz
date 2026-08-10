@@ -58,14 +58,14 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.2
+      Distance: 1.8
       Focal Point:
         X: 0
         Y: 0
         Z: 1.2
       Name: Current View
-      Pitch: -1.2
-      Yaw: 4.712389
+      Pitch: -0.6
+      Yaw: 4.2
       Value: Orbit (rviz)
     Saved: ~
 Window Geometry:

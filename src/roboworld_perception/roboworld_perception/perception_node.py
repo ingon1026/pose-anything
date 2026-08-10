@@ -80,6 +80,9 @@ class PerceptionNode(Node):
         self._busy = False
         self._display = self.get_parameter("display").value
         self._fps_ema = 0.0
+        self._last_frame_time = None
+        self._stale_cleared = True
+        self.create_timer(1.0, self._watchdog)
 
         self.pub_det = self.create_publisher(Detection3DArray,
                                              "/perception/detections", 10)
@@ -118,10 +121,23 @@ class PerceptionNode(Node):
         self.pipeline.reset()
         self.get_logger().info(f"prompts -> {self.prompts}")
 
+    def _watchdog(self):
+        """입력이 끊기면(bag 종료 등) 잔상 마커를 정리한다."""
+        if self._stale_cleared or self._last_frame_time is None:
+            return
+        if time.monotonic() - self._last_frame_time > 2.0:
+            markers = MarkerArray()
+            markers.markers.append(Marker(action=Marker.DELETEALL))
+            self.pub_markers.publish(markers)
+            self._stale_cleared = True
+            self.get_logger().info("입력 없음 2초 — 마커 정리")
+
     def on_frames(self, color_msg: Image, depth_msg: Image):
         if self.K is None or self._busy or not self.prompts:
             return  # ponytail: drop frames while inference is running
         self._busy = True
+        self._last_frame_time = time.monotonic()
+        self._stale_cleared = False
         try:
             t0 = time.perf_counter()
             img = img_to_np(color_msg)
@@ -181,7 +197,7 @@ class PerceptionNode(Node):
             axes = Marker()
             axes.header = det_array.header
             axes.ns, axes.id, axes.type = "axes", obj.track_id, Marker.LINE_LIST
-            axes.scale.x = 0.005
+            axes.scale.x = 0.012
             axes.color.a = 1.0
             for k, rgb in enumerate([(1, 0, 0), (0, 1, 0), (0, 0, 1)]):
                 tip = o.center + o.R[:, k] * (o.extent[k] / 2 + 0.03)
