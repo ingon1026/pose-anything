@@ -2,15 +2,15 @@
 # 사용법:
 #   ./run.sh                                  # 실시간 카메라 (D455)
 #   ./run.sh bags/test3                       # bag 재생
-#   ./run.sh bags/test3 --prompts "책" --mode offline   # 무인 실행
-# 플래그: --prompts "a,b" --mode ros|offline --threshold 0.4
+#   ./run.sh bags/test3 --prompts "책"        # 무인 실행
+# 플래그: --prompts "a,b" --threshold 0.4
+# (mp4/CSV만 뽑는 offline 처리: scripts/run_offline.py 직접 실행)
 cd "$(dirname "$0")"
 
-SOURCE="" PROMPTS="" MODE="" THRESHOLD=0.4
+SOURCE="" PROMPTS="" THRESHOLD=0.4
 while [ $# -gt 0 ]; do
   case "$1" in
     --prompts)   PROMPTS="$2"; shift 2 ;;
-    --mode)      MODE="$2"; shift 2 ;;
     --threshold) THRESHOLD="$2"; shift 2 ;;
     --source)    SOURCE="$2"; shift 2 ;;   # 하위 호환
     -*) echo "알 수 없는 인자: $1"; exit 1 ;;
@@ -34,22 +34,9 @@ if [ -z "$PROMPTS" ]; then
 fi
 [ -z "$PROMPTS" ] && { echo "물체를 최소 1개 입력하세요"; exit 1; }
 
-[ "$SOURCE" = "live" ] && MODE=ros  # 실시간은 ROS 모드 고정
-if [ -z "$MODE" ]; then
-  echo "실행 방식:  1) 간단 — mp4+CSV 생성, 화면 표시   2) ROS — 노드+RViz"
-  read -rp "번호 선택 [1-2]: " m
-  if [ "$m" = "2" ]; then MODE=ros; else MODE=offline; fi
-fi
-
-echo ">> 소스: $SOURCE | 물체: $PROMPTS | 모드: $MODE | threshold: $THRESHOLD"
-[ "${DRY_RUN:-0}" = "1" ] && { echo "[dry-run] source=$SOURCE prompts=$PROMPTS mode=$MODE"; exit 0; }
+echo ">> 소스: $SOURCE | 물체: $PROMPTS | threshold: $THRESHOLD"
+[ "${DRY_RUN:-0}" = "1" ] && { echo "[dry-run] source=$SOURCE prompts=$PROMPTS"; exit 0; }
 mkdir -p output
-
-if [ "$MODE" = "offline" ]; then
-  python3 scripts/run_offline.py --bag "$SOURCE" --prompts "$PROMPTS" \
-    --threshold "$THRESHOLD" --show
-  exit
-fi
 
 source install/setup.bash
 PIDS=()
