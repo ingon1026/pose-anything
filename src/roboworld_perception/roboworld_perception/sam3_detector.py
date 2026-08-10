@@ -32,6 +32,7 @@ class Sam3Detector:
         # 프롬프트당 유지할 인스턴스 수. open-vocab은 일치하는 모든 인스턴스를
         # 찾으므로, 기본은 최고 score 1개만 남긴다. 0 = 제한 없음.
         self.max_per_prompt = max_per_prompt
+        self._warned = set()
 
     @torch.no_grad()
     def detect(self, rgb: np.ndarray, prompts: list[str]) -> list[dict]:
@@ -48,6 +49,11 @@ class Sam3Detector:
         detections = []
         for label in prompts:
             text = PROMPT_ALIASES.get(label, label)
+            if not text.isascii() and label not in self._warned:
+                self._warned.add(label)
+                print(f"[경고] '{label}'은 별칭 테이블에 없는 한글 프롬프트입니다. "
+                      f"SAM3는 영어 기반이라 검출이 안 될 수 있습니다 — "
+                      f"영어로 입력하거나 PROMPT_ALIASES에 추가하세요.", flush=True)
             text_inputs = self.processor(text=text, return_tensors="pt").to(self.device)
             outputs = self.model(vision_embeds=vision_embeds, **text_inputs)
             results = self.processor.post_process_instance_segmentation(
