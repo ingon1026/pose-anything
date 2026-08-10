@@ -44,9 +44,13 @@ PIDS=()
 trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
 
 if [ "$SOURCE" = "live" ]; then
-  echo ">> RealSense 카메라 시작..."
-  ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
-  PIDS+=($!)
+  if ros2 topic list 2>/dev/null | grep -q "^/camera/camera/color/image_raw$"; then
+    echo ">> 이미 실행 중인 카메라 노드를 사용합니다 (중복 실행 방지)"
+  else
+    echo ">> RealSense 카메라 시작..."
+    ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
+    PIDS+=($!)
+  fi
 fi
 
 LOG=$(mktemp)

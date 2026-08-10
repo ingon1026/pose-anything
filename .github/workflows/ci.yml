@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install runtime libs
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libgomp1
+      - name: Install python deps
+        # torch/SAM3 불필요 — geometry·tracker·pipeline 단위 테스트만 실행
+        run: pip install numpy scipy opencv-python-headless open3d pillow pytest
+      - name: Run unit tests
+        run: pytest src/roboworld_perception/test -q
