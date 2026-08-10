@@ -20,26 +20,13 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 import cv2
 
-from .overlay import PALETTE, draw_objects, draw_status
-from .pipeline import PerceptionPipeline
-from .sam3_detector import PROMPT_ALIASES, Sam3Detector
+from .overlay import PALETTE, draw_objects, draw_status, show_window
+from .pipeline import (CSV_HEADER, PerceptionPipeline, csv_row, img_to_np,
+                       status_text)
+from .sam3_detector import PROMPT_ALIASES, Sam3Detector, parse_prompts
 
 # ponytail: manual Image<->numpy instead of cv_bridge (its binary is built
 # against numpy 1.x and may crash under the numpy 2.x in this env)
-
-
-def img_to_np(msg: Image) -> np.ndarray:
-    if msg.encoding in ("rgb8", "bgr8"):
-        ch, dtype = 3, np.uint8
-    elif msg.encoding == "16UC1":
-        ch, dtype = 1, np.uint16
-    else:
-        raise ValueError(f"unsupported encoding {msg.encoding}")
-    itemsize = np.dtype(dtype).itemsize
-    arr = np.frombuffer(msg.data, dtype).reshape(msg.height,
-                                                 msg.step // itemsize)
-    arr = arr[:, :msg.width * ch]
-    return arr.reshape(msg.height, msg.width, ch).squeeze()
 
 
 def np_to_imgmsg(bgr: np.ndarray) -> Image:
@@ -65,14 +52,14 @@ class PerceptionNode(Node):
         self.declare_parameter("info_topic", "/camera/camera/color/camera_info")
         self.declare_parameter("csv_path", "")
 
-        self.prompts = [p.strip() for p in
-                        self.get_parameter("prompts").value.split(",") if p.strip()]
+        self.prompts = parse_prompts(self.get_parameter("prompts").value)
         threshold = self.get_parameter("score_threshold").value
         self.get_logger().info(f"loading SAM3... prompts={self.prompts}")
         self.pipeline = PerceptionPipeline(
             Sam3Detector(threshold=threshold),
             detect_interval=self.get_parameter("detect_interval").value,
             max_per_prompt=self.get_parameter("max_per_prompt").value)
+        # run.sh가 이 문자열을 grep으로 대기한다 — 문구 변경 시 run.sh도 수정
         self.get_logger().info("SAM3 ready")
 
         self.K = None
@@ -106,9 +93,7 @@ class PerceptionNode(Node):
             # buffering=1: 노드가 SIGTERM으로 죽어도 기록이 남도록 라인 버퍼링
             self._csv_file = open(csv_path, "w", newline="", buffering=1)
             self.csv_writer = csv.writer(self._csv_file)
-            self.csv_writer.writerow(
-                ["stamp", "track_id", "label", "score", "x", "y", "z", "distance",
-                 "w", "d", "h", "roll", "pitch", "yaw", "flips", "proc_ms"])
+            self.csv_writer.writerow(CSV_HEADER)
 
     def on_info(self, msg: CameraInfo):
         if self.K is None:
@@ -117,7 +102,7 @@ class PerceptionNode(Node):
             self.get_logger().info(f"camera_info received, frame={self.frame_id}")
 
     def on_prompt(self, msg: String):
-        self.prompts = [p.strip() for p in msg.data.split(",") if p.strip()]
+        self.prompts = parse_prompts(msg.data)
         self.pipeline.reset()
         self.get_logger().info(f"prompts -> {self.prompts}")
 
@@ -141,11 +126,12 @@ class PerceptionNode(Node):
         try:
             t0 = time.perf_counter()
             img = img_to_np(color_msg)
-            rgb = img if color_msg.encoding == "rgb8" else img[:, :, ::-1]
+            if color_msg.encoding == "rgb8":
+                rgb, bgr = img, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            else:
+                rgb, bgr = cv2.cvtColor(img, cv2.COLOR_BGR2RGB), img.copy()
             depth = img_to_np(depth_msg)
-            objects = self.pipeline.process(np.ascontiguousarray(rgb), depth,
-                                            self.K, self.prompts)
-            bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+            objects = self.pipeline.process(rgb, depth, self.K, self.prompts)
             proc_ms = (time.perf_counter() - t0) * 1000
             self.publish(objects, color_msg.header.stamp, bgr, proc_ms)
         except Exception as e:  # keep the node alive on a bad frame
@@ -221,13 +207,7 @@ class PerceptionNode(Node):
             markers.markers.append(text)
 
             if self.csv_writer:
-                r, p, y = o.rpy
-                self.csv_writer.writerow(
-                    [f"{stamp_s:.6f}", obj.track_id, obj.label,
-                     f"{obj.score:.3f}", *[f"{v:.4f}" for v in o.center],
-                     f"{o.distance:.4f}", *[f"{v:.4f}" for v in o.extent],
-                     f"{r:.2f}", f"{p:.2f}", f"{y:.2f}", obj.flip_count,
-                     f"{proc_ms:.1f}"])
+                self.csv_writer.writerow(csv_row(obj, stamp_s, proc_ms))
 
         self.pub_det.publish(det_array)
         self.pub_markers.publish(markers)
@@ -236,17 +216,12 @@ class PerceptionNode(Node):
         self._fps_ema = inst_fps if self._fps_ema == 0 else \
             0.9 * self._fps_ema + 0.1 * inst_fps
         draw_objects(bgr, objects, self.K)
-        mode = "KEY" if self.pipeline.last_was_keyframe else "track"
-        draw_status(bgr, f"{self._fps_ema:4.1f} FPS | {mode} | objects={len(objects)}")
+        draw_status(bgr, status_text(self._fps_ema, self.pipeline, objects))
         debug = np_to_imgmsg(bgr)
         debug.header = det_array.header
         self.pub_debug.publish(debug)
         if self._display:
-            try:
-                cv2.imshow("roboworld perception", bgr)
-                cv2.waitKey(1)
-            except cv2.error:
-                self._display = False  # 디스플레이 없는 환경
+            self._display = show_window(bgr)
 
 
 def main(args=None):

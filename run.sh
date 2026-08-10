@@ -63,6 +63,7 @@ ros2 run roboworld_perception perception_node --ros-args \
   -p display:=$DISPLAY_PARAM -p csv_path:="$CSV" > "$LOG" 2>&1 &
 NODE_PID=$!
 PIDS+=($NODE_PID)
+# "SAM3 ready"는 perception_node가 찍는 로그 — 노드 쪽 문구 변경 시 함께 수정
 until grep -q "SAM3 ready" "$LOG"; do
   kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -5 "$LOG"; exit 1; }
   sleep 2

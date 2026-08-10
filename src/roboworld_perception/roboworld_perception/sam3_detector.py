@@ -17,10 +17,15 @@ PROMPT_ALIASES = {
 }
 
 
+def parse_prompts(s):
+    """쉼표 구분 프롬프트 문자열 → 리스트 (노드·스크립트 공용 규칙)."""
+    return [p.strip() for p in s.split(",") if p.strip()]
+
+
 class Sam3Detector:
     def __init__(self, model_id="facebook/sam3", device=None, threshold=0.4,
-                 mask_threshold=0.5, max_per_prompt=1, dtype=torch.bfloat16,
-                 image_size=0, compile_model=False):
+                 mask_threshold=0.5, dtype=torch.bfloat16, image_size=0,
+                 compile_model=False):
         from transformers import Sam3Config, Sam3Model, Sam3Processor
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         # bf16이 fp32 대비 3.7배 빠르고 score 차이 없음 (실측 548ms -> 150ms)
@@ -39,10 +44,14 @@ class Sam3Detector:
         self.processor = Sam3Processor.from_pretrained(model_id, **proc_kwargs)
         self.threshold = threshold
         self.mask_threshold = mask_threshold
-        # 프롬프트당 유지할 인스턴스 수. open-vocab은 일치하는 모든 인스턴스를
-        # 찾으므로, 기본은 최고 score 1개만 남긴다. 0 = 제한 없음.
-        self.max_per_prompt = max_per_prompt
         self._warned = set()
+        self._text_cache = {}  # 프롬프트별 토큰화 결과 (키프레임마다 재계산 방지)
+
+    def _text_inputs(self, text):
+        if text not in self._text_cache:
+            self._text_cache[text] = self.processor(
+                text=text, return_tensors="pt").to(self.device)
+        return self._text_cache[text]
 
     @torch.no_grad()
     def detect(self, rgb: np.ndarray, prompts: list[str]) -> list[dict]:
@@ -64,20 +73,16 @@ class Sam3Detector:
                 print(f"[경고] '{label}'은 별칭 테이블에 없는 한글 프롬프트입니다. "
                       f"SAM3는 영어 기반이라 검출이 안 될 수 있습니다 — "
                       f"영어로 입력하거나 PROMPT_ALIASES에 추가하세요.", flush=True)
-            text_inputs = self.processor(text=text, return_tensors="pt").to(self.device)
-            outputs = self.model(vision_embeds=vision_embeds, **text_inputs)
+            outputs = self.model(vision_embeds=vision_embeds,
+                                 **self._text_inputs(text))
             results = self.processor.post_process_instance_segmentation(
                 outputs, threshold=self.threshold,
                 mask_threshold=self.mask_threshold, target_sizes=target_sizes)[0]
-            found = [{
+            detections.extend({
                 "label": label,
                 "mask": mask.cpu().numpy().astype(bool),
                 "box": box.float().cpu().numpy().astype(float),
                 "score": float(score),
             } for mask, box, score in zip(results["masks"], results["boxes"],
-                                          results["scores"])]
-            found.sort(key=lambda d: -d["score"])
-            if self.max_per_prompt > 0:
-                found = found[:self.max_per_prompt]
-            detections.extend(found)
+                                          results["scores"]))
         return detections

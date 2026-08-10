@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Run the full perception pipeline on an mcap rosbag without ROS.
 
-Reads color + aligned depth + camera_info via `rosbags`, pairs frames by
-nearest timestamp, runs SAM3 -> tracker -> OBB, writes an overlay mp4,
-a per-frame CSV and prints per-track stability metrics.
+Reads color + aligned depth + camera_info via `rosbags` as a stream (bounded
+memory — bag length doesn't matter), runs SAM3 -> tracker -> OBB, writes an
+overlay mp4 at the bag's real average fps, a per-frame CSV and prints
+per-track stability metrics.
 
 Usage:
-  python3 scripts/run_offline.py --bag bags/test2 --prompts "물통,마우스,필통"
-  python3 scripts/run_offline.py --bag bags/test3 --prompts 물통 --max-frames 50
+  python3 scripts/run_offline.py --bag bags/test2 --prompts "물통,노트북"
+  python3 scripts/run_offline.py --bag bags/test3 --prompts 책 --show
 """
 import argparse
 import csv
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -22,45 +24,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "roboworld_
 
 from rosbags.highlevel import AnyReader  # noqa: E402
 
+from roboworld_perception.pipeline import (CSV_HEADER, csv_row,  # noqa: E402
+                                           img_to_np, status_text)
+
 COLOR = "/camera/camera/color/image_raw"
 DEPTH = "/camera/camera/aligned_depth_to_color/image_raw"
 INFO = "/camera/camera/color/camera_info"
 
 
+def bag_color_fps(bag_path):
+    """색상 토픽 평균 fps (타임스탬프만 스캔 — 디코드 없음, 수 초 내)."""
+    with AnyReader([Path(bag_path)]) as reader:
+        conns = [c for c in reader.connections if c.topic == COLOR]
+        ts = [t for _, t, _ in reader.messages(connections=conns)]
+    if len(ts) < 2:
+        return 15.0
+    return (len(ts) - 1) / ((ts[-1] - ts[0]) * 1e-9)
+
+
 def read_bag(bag_path, max_frames=None):
-    """Yield (stamp_s, rgb, depth_mm, K) with depth matched to each color frame."""
+    """(stamp_s, rgb, depth_mm, K)를 스트리밍으로 yield — 메모리 O(1).
+
+    bag 메시지는 시간순이므로, 최근 depth만 deque로 들고 있다가 각 색상
+    프레임을 가장 가까운 depth와 짝짓는다. 색상 디코드는 짝이 확정된
+    프레임에만 수행한다.
+    """
     with AnyReader([Path(bag_path)]) as reader:
         conns = [c for c in reader.connections if c.topic in (COLOR, DEPTH, INFO)]
         K = None
-        depths = []  # (t, msg) buffer; bag is time-ordered so keep it small
-        colors = []
+        depths = deque(maxlen=60)   # (t, 디코드된 depth) — 약 2초 분량
+        pending = deque()           # 아직 더 늦은 depth를 기다리는 색상 raw
+        count = 0
+
+        def match(ct, craw, cconn):
+            nonlocal count
+            if K is None or not depths:
+                return None
+            dt, dimg = min(depths, key=lambda d: abs(d[0] - ct))
+            if abs(dt - ct) > 50e6:  # >50ms: 짝 없음
+                return None
+            cmsg = reader.deserialize(craw, cconn.msgtype)
+            rgb = img_to_np(cmsg)
+            if cmsg.encoding == "bgr8":
+                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            count += 1
+            return ct * 1e-9, rgb, dimg, K
+
         for conn, t, raw in reader.messages(connections=conns):
-            msg = reader.deserialize(raw, conn.msgtype)
             if conn.topic == INFO:
                 if K is None:
-                    K = np.array(msg.k).reshape(3, 3)
+                    K = np.array(reader.deserialize(raw, conn.msgtype).k).reshape(3, 3)
             elif conn.topic == DEPTH:
-                depths.append((t, msg))
+                depths.append((t, img_to_np(reader.deserialize(raw, conn.msgtype))))
             else:
-                colors.append((t, msg))
-        colors.sort(key=lambda x: x[0])
-        depth_ts = np.array([t for t, _ in depths])
-        count = 0
-        for t, cmsg in colors:
-            if K is None or len(depths) == 0:
-                break
-            i = int(np.argmin(np.abs(depth_ts - t)))
-            if abs(depth_ts[i] - t) > 50e6:  # >50ms apart: no matching depth
-                continue
-            dmsg = depths[i][1]
-            rgb = np.frombuffer(cmsg.data, np.uint8).reshape(cmsg.height, cmsg.width, 3)
-            if cmsg.encoding == "bgr8":
-                rgb = rgb[:, :, ::-1]
-            depth = np.frombuffer(dmsg.data, np.uint16).reshape(dmsg.height, dmsg.width)
-            yield t * 1e-9, rgb.copy(), depth, K
-            count += 1
-            if max_frames and count >= max_frames:
-                break
+                pending.append((t, raw, conn))
+            while pending and depths and depths[-1][0] >= pending[0][0]:
+                item = match(*pending.popleft())
+                if item is not None:
+                    yield item
+                    if max_frames and count >= max_frames:
+                        return
+        for args in pending:  # bag 끝: 남은 색상은 마지막 depth들과 매칭
+            item = match(*args)
+            if item is not None:
+                yield item
+                if max_frames and count >= max_frames:
+                    return
 
 
 def summarize(rows):
@@ -100,14 +129,15 @@ def main():
                     help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
     args = ap.parse_args()
 
-    from roboworld_perception.overlay import draw_objects, draw_status
+    from roboworld_perception.overlay import draw_objects, draw_status, show_window
     from roboworld_perception.pipeline import PerceptionPipeline
-    from roboworld_perception.sam3_detector import Sam3Detector
+    from roboworld_perception.sam3_detector import Sam3Detector, parse_prompts
 
-    prompts = [p.strip() for p in args.prompts.split(",") if p.strip()]
+    prompts = parse_prompts(args.prompts)
     out_dir = Path(args.out)
     out_dir.mkdir(exist_ok=True)
     tag = f"{Path(args.bag).name}_{'-'.join(prompts)}"
+    fps = bag_color_fps(args.bag)
 
     print("loading SAM3...")
     pipeline = PerceptionPipeline(
@@ -120,70 +150,41 @@ def main():
     csv_path = out_dir / f"{tag}.csv"
     with open(csv_path, "w", newline="") as f:
         cw = csv.writer(f)
-        cw.writerow(["stamp", "track_id", "label", "score", "x", "y", "z",
-                     "distance", "w", "d", "h", "roll", "pitch", "yaw",
-                     "flips", "proc_ms"])
+        cw.writerow(CSV_HEADER)
         t_start = time.perf_counter()
         n = 0
-        stamps = []
-        tmp_path = out_dir / f"{tag}.tmp.mp4"
         for stamp, rgb, depth, K in read_bag(args.bag, args.max_frames):
             t0 = time.perf_counter()
             objects = pipeline.process(rgb, depth, K, prompts)
             proc_ms = (time.perf_counter() - t0) * 1000
-            bgr = draw_objects(rgb[:, :, ::-1].copy(), objects, K)
-            mode = "KEY" if pipeline.last_was_keyframe else "track"
-            draw_status(bgr, f"{1000 / max(proc_ms, 1e-3):4.1f} FPS | {mode} | "
-                             f"objects={len(objects)}")
-            stamps.append(stamp)
+            bgr = draw_objects(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), objects, K)
+            draw_status(bgr, status_text(1000 / max(proc_ms, 1e-3), pipeline, objects))
             if writer is None:
-                writer = cv2.VideoWriter(str(tmp_path),
-                                         cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                writer = cv2.VideoWriter(str(out_dir / f"{tag}.mp4"),
+                                         cv2.VideoWriter_fourcc(*"mp4v"),
+                                         round(fps, 2),
                                          (bgr.shape[1], bgr.shape[0]))
             writer.write(bgr)
-            if args.show:
-                try:
-                    cv2.imshow("roboworld perception", bgr)
-                    cv2.waitKey(1)
-                except cv2.error:
-                    args.show = False  # 디스플레이 없는 환경이면 창 없이 계속
+            if args.show and not show_window(bgr):
+                args.show = False  # 디스플레이 없는 환경이면 창 없이 계속
             n += 1
             for o in objects:
                 if o.obb is None:
                     continue
-                r, p, y = o.obb.rpy
-                row = dict(stamp=stamp, track_id=o.track_id, label=o.label,
-                           score=o.score, x=o.obb.center[0], y=o.obb.center[1],
-                           z=o.obb.center[2], distance=o.obb.distance,
-                           w=o.obb.extent[0], d=o.obb.extent[1], h=o.obb.extent[2],
-                           roll=r, pitch=p, yaw=y, flips=o.flip_count,
-                           proc_ms=proc_ms)
-                rows.append(row)
-                cw.writerow([f"{v:.4f}" if isinstance(v, float) else v
-                             for v in row.values()])
+                cw.writerow(csv_row(o, stamp, proc_ms))
+                rows.append(dict(stamp=stamp, track_id=o.track_id, label=o.label,
+                                 x=o.obb.center[0], y=o.obb.center[1],
+                                 z=o.obb.center[2], w=o.obb.extent[0],
+                                 d=o.obb.extent[1], h=o.obb.extent[2],
+                                 roll=o.obb.rpy[0], pitch=o.obb.rpy[1],
+                                 yaw=o.obb.rpy[2], flips=o.flip_count))
             if n % 20 == 0:
                 print(f"frame {n}: {len(objects)} objects, {proc_ms:.0f}ms")
         total = time.perf_counter() - t_start
     if writer:
         writer.release()
-        # x1 재생 보장: 전체 구간 평균 fps로 재인코딩 (카메라 30fps 설정이지만
-        # 녹화 드랍으로 실제 ~18fps인 bag에서 프레임 간격 기반 추정은 가속됨)
-        fps = (len(stamps) - 1) / max(stamps[-1] - stamps[0], 1e-3) if len(stamps) > 1 else 15
-        cap = cv2.VideoCapture(str(tmp_path))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        out = cv2.VideoWriter(str(out_dir / f"{tag}.mp4"),
-                              cv2.VideoWriter_fourcc(*"mp4v"), round(fps, 2), (w, h))
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            out.write(frame)
-        cap.release()
-        out.release()
-        tmp_path.unlink()
     print(f"\n{n} frames in {total:.1f}s -> {n / max(total, 1e-9):.2f} FPS")
-    print(f"video: {out_dir / f'{tag}.mp4'}\ncsv:   {csv_path}")
+    print(f"video: {out_dir / f'{tag}.mp4'} ({fps:.1f}fps)\ncsv:   {csv_path}")
     summarize(rows)
 
 

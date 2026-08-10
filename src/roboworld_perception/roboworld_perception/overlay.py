@@ -32,15 +32,25 @@ def draw_status(bgr, text):
     return bgr
 
 
+def show_window(bgr):
+    """디버그 창 표시. 디스플레이 없는 환경이면 False (호출측은 플래그 끄기)."""
+    try:
+        cv2.imshow("roboworld perception", bgr)
+        cv2.waitKey(1)
+        return True
+    except cv2.error:
+        return False
+
+
 def draw_objects(bgr, objects, K):
     """objects: list of pipeline.TrackedObject. Draws in place, returns bgr."""
     texts = []
     for obj in objects:
         color = PALETTE[obj.track_id % len(PALETTE)]
 
-        overlay = bgr.copy()
-        overlay[obj.mask] = color
-        cv2.addWeighted(overlay, 0.35, bgr, 0.65, 0, dst=bgr)
+        # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
+        bgr[obj.mask] = (0.35 * np.array(color) + 0.65 * bgr[obj.mask]) \
+            .astype(np.uint8)
         contours, _ = cv2.findContours(obj.mask.astype(np.uint8),
                                        cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(bgr, contours, -1, color, 2)

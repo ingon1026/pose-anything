@@ -78,6 +78,7 @@ class IouTracker:
         Matching is restricted to same-label tracks.
         """
         pairs = []
+        n_old = len(self.tracks)  # 이 아래에서 추가되는 새 트랙과 구분
         candidates = [
             (box_iou(t.box, d["box"]), ti, di)
             for ti, t in enumerate(self.tracks)
@@ -110,8 +111,8 @@ class IouTracker:
             self.tracks.append(t)
             pairs.append((t, d))
 
-        for ti, t in enumerate(self.tracks):
-            if ti not in used_t and t not in [p[0] for p in pairs]:
-                t.missed += 1
+        for ti in range(n_old):
+            if ti not in used_t:
+                self.tracks[ti].missed += 1
         self.tracks = [t for t in self.tracks if t.missed <= self.max_missed]
         return pairs
