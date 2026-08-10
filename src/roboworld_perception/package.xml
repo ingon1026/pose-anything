@@ -4,7 +4,7 @@
   <name>roboworld_perception</name>
   <version>0.1.0</version>
   <description>Text-prompted conveyor object detection with 3D OBB pose (SAM3 + Open3D)</description>
-  <maintainer email="k3i_ai5@k3i.co.kr">ingon</maintainer>
+  <maintainer email="157796083+ingon1026@users.noreply.github.com">ingon</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>

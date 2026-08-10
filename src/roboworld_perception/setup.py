@@ -16,7 +16,7 @@ setup(
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="ingon",
-    maintainer_email="k3i_ai5@k3i.co.kr",
+    maintainer_email="157796083+ingon1026@users.noreply.github.com",
     description="Text-prompted conveyor object detection with 3D OBB pose",
     license="MIT",
     entry_points={
