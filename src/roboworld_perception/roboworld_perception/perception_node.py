@@ -55,6 +55,7 @@ class PerceptionNode(Node):
         self.declare_parameter("prompts", "물통")
         self.declare_parameter("score_threshold", 0.4)
         self.declare_parameter("max_per_prompt", 1)
+        self.declare_parameter("detect_interval", 5)
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic",
                                "/camera/camera/aligned_depth_to_color/image_raw")
@@ -65,9 +66,10 @@ class PerceptionNode(Node):
                         self.get_parameter("prompts").value.split(",") if p.strip()]
         threshold = self.get_parameter("score_threshold").value
         self.get_logger().info(f"loading SAM3... prompts={self.prompts}")
-        self.pipeline = PerceptionPipeline(Sam3Detector(
-            threshold=threshold,
-            max_per_prompt=self.get_parameter("max_per_prompt").value))
+        self.pipeline = PerceptionPipeline(
+            Sam3Detector(threshold=threshold),
+            detect_interval=self.get_parameter("detect_interval").value,
+            max_per_prompt=self.get_parameter("max_per_prompt").value)
         self.get_logger().info("SAM3 ready")
 
         self.K = None

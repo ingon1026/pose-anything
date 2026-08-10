@@ -96,6 +96,8 @@ def main():
                     help="프롬프트당 유지할 인스턴스 수 (0=제한 없음)")
     ap.add_argument("--image-size", type=int, default=0,
                     help="SAM3 입력 해상도 (0=기본 1008)")
+    ap.add_argument("--detect-interval", type=int, default=5,
+                    help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
     args = ap.parse_args()
 
     from roboworld_perception.overlay import draw_objects
@@ -108,9 +110,10 @@ def main():
     tag = f"{Path(args.bag).name}_{'-'.join(prompts)}"
 
     print("loading SAM3...")
-    pipeline = PerceptionPipeline(Sam3Detector(
-        threshold=args.threshold, max_per_prompt=args.max_per_prompt,
-        image_size=args.image_size))
+    pipeline = PerceptionPipeline(
+        Sam3Detector(threshold=args.threshold, image_size=args.image_size),
+        detect_interval=args.detect_interval,
+        max_per_prompt=args.max_per_prompt)
 
     writer = None
     rows = []

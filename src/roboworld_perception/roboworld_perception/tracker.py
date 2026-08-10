@@ -26,6 +26,7 @@ class Track:
     missed: int = 0
     flip_count: int = 0
     age: int = 0
+    mask: np.ndarray | None = field(default=None, repr=False)  # 하이브리드 추적용
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 
     def update_obb(self, obb: ObbResult | None, ema=0.4, rot_alpha=0.5):
@@ -47,9 +48,13 @@ class Track:
 
 
 class IouTracker:
-    def __init__(self, iou_threshold=0.3, max_missed=5):
+    def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0):
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
+        # 라벨당 트랙 수 제한 (0=무제한). 검출 단계에서 top-1을 자르면
+        # score 역전 시 다른 인스턴스로 튀어 ID가 끊기므로, 후보는 전부
+        # 받아 기존 트랙과 먼저 매칭하고 "새 트랙 생성"만 제한한다.
+        self.max_per_label = max_per_label
         self.tracks: list[Track] = []
         self._next_id = 1
 
@@ -83,8 +88,12 @@ class IouTracker:
             t.age += 1
             pairs.append((t, detections[di]))
 
-        for di, d in enumerate(detections):
-            if di in used_d:
+        unmatched = sorted((d for di, d in enumerate(detections) if di not in used_d),
+                           key=lambda d: -d["score"])
+        for d in unmatched:
+            alive = sum(1 for t in self.tracks
+                        if t.label == d["label"] and t.missed <= self.max_missed)
+            if self.max_per_label > 0 and alive >= self.max_per_label:
                 continue
             t = Track(self._next_id, d["label"], np.asarray(d["box"], dtype=float),
                       d["score"])
