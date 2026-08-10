@@ -94,6 +94,8 @@ def main():
     ap.add_argument("--show", action="store_true", help="처리 중 오버레이 창 표시")
     ap.add_argument("--max-per-prompt", type=int, default=1,
                     help="프롬프트당 유지할 인스턴스 수 (0=제한 없음)")
+    ap.add_argument("--image-size", type=int, default=0,
+                    help="SAM3 입력 해상도 (0=기본 1008)")
     args = ap.parse_args()
 
     from roboworld_perception.overlay import draw_objects
@@ -107,7 +109,8 @@ def main():
 
     print("loading SAM3...")
     pipeline = PerceptionPipeline(Sam3Detector(
-        threshold=args.threshold, max_per_prompt=args.max_per_prompt))
+        threshold=args.threshold, max_per_prompt=args.max_per_prompt,
+        image_size=args.image_size))
 
     writer = None
     rows = []

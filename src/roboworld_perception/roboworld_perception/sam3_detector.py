@@ -19,14 +19,24 @@ PROMPT_ALIASES = {
 
 class Sam3Detector:
     def __init__(self, model_id="facebook/sam3", device=None, threshold=0.4,
-                 mask_threshold=0.5, max_per_prompt=1, dtype=torch.bfloat16):
-        from transformers import Sam3Model, Sam3Processor
+                 mask_threshold=0.5, max_per_prompt=1, dtype=torch.bfloat16,
+                 image_size=0, compile_model=False):
+        from transformers import Sam3Config, Sam3Model, Sam3Processor
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         # bf16이 fp32 대비 3.7배 빠르고 score 차이 없음 (실측 548ms -> 150ms)
         self.dtype = dtype if self.device == "cuda" else torch.float32
+        kwargs = {}
+        proc_kwargs = {}
+        if image_size:  # 0 = 기본 1008px. 축소 시 속도↑, 작은 물체 검출력↓
+            config = Sam3Config.from_pretrained(model_id)
+            config.image_size = image_size
+            kwargs["config"] = config
+            proc_kwargs["size"] = {"height": image_size, "width": image_size}
         self.model = Sam3Model.from_pretrained(
-            model_id, dtype=self.dtype).to(self.device).eval()
-        self.processor = Sam3Processor.from_pretrained(model_id)
+            model_id, dtype=self.dtype, **kwargs).to(self.device).eval()
+        if compile_model:
+            self.model = torch.compile(self.model)
+        self.processor = Sam3Processor.from_pretrained(model_id, **proc_kwargs)
         self.threshold = threshold
         self.mask_threshold = mask_threshold
         # 프롬프트당 유지할 인스턴스 수. open-vocab은 일치하는 모든 인스턴스를
