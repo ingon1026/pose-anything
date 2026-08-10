@@ -85,10 +85,13 @@ Requires Docker and [nvidia-container-toolkit](https://docs.nvidia.com/datacente
 git clone https://github.com/ingon1026/pose-anything.git
 cd pose-anything
 export HF_TOKEN=hf_xxxx            # token of an account with facebook/sam3 access
-docker compose build               # ~21 GB (CUDA PyTorch)
 docker compose run --rm perception                                    # live camera
 docker compose run --rm perception ./run.sh bags/mybag --prompts "book"   # rosbag
 ```
+
+The prebuilt image is pulled from
+[Docker Hub (`ingon1026/pose-anything`)](https://hub.docker.com/r/ingon1026/pose-anything)
+on first run — no local build needed. To build from source instead: `docker compose build` (~21 GB).
 
 Model weights are **not** baked into the image (Meta's gated license) — they are
 downloaded once on first run into a mounted cache volume and reused afterwards.

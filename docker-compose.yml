@@ -1,7 +1,7 @@
 services:
   perception:
     build: .
-    image: pose-anything
+    image: ingon1026/pose-anything:latest   # 로컬에 없으면 Docker Hub에서 pull
     network_mode: host        # 호스트 ROS 노드와 DDS 통신
     ipc: host
     privileged: true          # RealSense USB 접근 (bag만 쓰면 제거 가능)
