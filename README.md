@@ -1,133 +1,174 @@
-# roboworld — 텍스트로 지정하는 컨베이어 물체 인식 + 3D 자세 추정
+<div align="center">
 
-물체 이름을 텍스트로 입력하면(`"물통"`, `"book"`) RGB-D 카메라 영상에서 해당 물체를
-**학습 없이(zero-shot)** 찾아 분할·추적하고, 3D 중심 좌표·크기·자세(OBB)를
-ROS 2 토픽으로 출력하는 인식 파이프라인입니다.
+# pose-anything
 
-| 이동 추적 (컨베이어 동작 중) | 다중 물체 검출 (정지 장면) |
+**Type an object's name — get its mask, track ID, and 6-DoF pose from an RGB-D camera. No training, no CAD models.**
+
+*Open-vocabulary detection with SAM 3, hybrid optical-flow tracking, and Open3D OBB pose estimation on ROS 2.*
+
+[![SAM 3](https://img.shields.io/badge/SAM_3-Meta_AI-0467DF?logo=meta&logoColor=white)](https://github.com/facebookresearch/sam3)
+[![ROS 2](https://img.shields.io/badge/ROS_2-Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/jazzy/)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#requirements)
+[![PyTorch](https://img.shields.io/badge/PyTorch-CUDA_bf16-EE4C2C?logo=pytorch&logoColor=white)](#requirements)
+[![Open3D](https://img.shields.io/badge/Open3D-0.19-000000)](http://www.open3d.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+
+</div>
+
+Point the camera at a conveyor, type `"book"` (or `"책"` — Korean aliases included),
+and every frame you get the segmentation mask, a persistent track ID, the 3D center,
+width/depth/height, and roll/pitch/yaw — published as standard ROS 2 messages that
+any robot node can consume.
+
+![Tracking three objects on a moving conveyor](docs/images/demo_tracking.png)
+
+<sub>**Moving conveyor, three text prompts** (`블록`/block, `책`/book, `장갑`/glove) — each object keeps
+a single track ID for the entire 20-second sequence with zero axis flips. Overlay shows mask,
+projected 3D bounding box, local XYZ axes, distance, size, and RPY per object.</sub>
+
+![Multi-object detection on a static scene](docs/images/demo_static.png)
+
+<sub>**Static scene, four prompts** — thermos, laptop, book, smartphone. Estimated OBB sizes match
+the real objects within ±1 cm.</sub>
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["RGB + aligned depth<br/>(rosbag or RealSense D455)"] --> B{"every Nth frame"}
+    B -- "keyframe" --> C["SAM 3<br/>text-prompted detection<br/>+ segmentation"]
+    B -- "in between" --> D["Lucas-Kanade optical flow<br/>mask propagation"]
+    C --> E["IoU tracker<br/>persistent IDs"]
+    D --> E
+    E --> F["mask + depth + K<br/>→ point cloud (MAD filter)<br/>→ Open3D OBB"]
+    F --> G["temporal stabilization<br/>axis continuity · deadband · slerp"]
+    G --> H["Detection3DArray<br/>RViz markers · debug video · CSV"]
+```
+
+Running the 848M-parameter SAM 3 on every frame caps throughput at ~3 FPS.
+The hybrid scheme runs it only on keyframes (default: every 5th frame) and tracks
+masks with optical flow in between, reaching **~9 FPS** on an RTX 4070 Ti —
+while the 3D pose is still recomputed **every frame** from that frame's real depth.
+
+Since OBB axes are arbitrary up to permutation and sign, the stabilizer matches each
+new OBB against the previous frame's axes, ignores sub-2° jitter (deadband), and
+slerps the rest — bringing yaw noise down from 3.5° to **0.94° per frame** with zero
+90°/180° axis flips.
+
+## Measured results
+
+Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not included in this repo):
+
+| Metric | Result |
 |---|---|
-| ![tracking](docs/images/demo_tracking.png) | ![static](docs/images/demo_static.png) |
+| Track ID persistence (3 moving objects, 20 s) | single ID each, 0 axis flips |
+| OBB size vs. real objects | within ±1 cm |
+| Center jitter (static objects) | ≤ 1.3 mm std |
+| Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
+| Throughput (3 prompts, RTX 4070 Ti) | ~9 FPS |
 
-## 특징
+## Requirements
 
-- **Open-vocabulary 검출** — Meta SAM3로 임의 텍스트 프롬프트 물체를 클래스 정의·학습 없이 검출·분할
-- **하이브리드 검출·추적** — SAM3는 N프레임마다(키프레임), 사이는 Lucas-Kanade 광학흐름으로 마스크 추적 → 단독 SAM 대비 약 3배 처리율 (RTX 4070 Ti 기준 ~9 FPS)
-- **기하학적 6D 자세** — 마스크 + aligned depth → 포인트 클라우드 → Open3D OBB. CAD 모델 불필요
-- **시간 안정화** — 축 순열·부호 연속성 매칭(뒤집힘 방지), 회전 데드밴드 + slerp, 중심·크기 EMA → yaw 떨림 0.94°/frame
-- **rosbag / 실시간 겸용** — 같은 노드가 `ros2 bag play`와 RealSense D455 라이브 입력을 동일하게 처리
+- Ubuntu 24.04 (verified on WSL2) with **ROS 2 Jazzy**
+- NVIDIA GPU with ≥ 6 GB VRAM, PyTorch CUDA build (bf16 inference)
+- Python 3.12 — `transformers>=5.5`, `open3d`, `rosbags`, `scipy`, `opencv-python`
+- Intel RealSense D455 + [`realsense2_camera`](https://github.com/IntelRealSense/realsense-ros) for live input
+- A Hugging Face account with access to the gated
+  [`facebook/sam3`](https://huggingface.co/facebook/sam3) checkpoint
+  (click *"Agree and access repository"* on the model page — approval is immediate)
 
-## 검증 결과
-
-자체 촬영 rosbag(정지 장면 13초 / 컨베이어 동작 20초, 저장소 미포함) 기준:
-
-| 항목 | 결과 |
-|---|---|
-| 이동 물체 추적 (20초, 3물체) | 전 구간 단일 ID 유지, 축 뒤집힘 0회 |
-| 3D 크기 추정 | 실측 대비 ±1cm 이내 (책 0.27×0.22m 등) |
-| 중심 안정성 (정지 물체) | 표준편차 ≤ 1.3mm |
-| 자세 안정성 | yaw 프레임간 변화 평균 0.94°, 5° 이상 점프 0% |
-| 처리 속도 | ~9 FPS (bf16, 하이브리드, 3프롬프트) |
-
-## 요구사항
-
-- Ubuntu 24.04 (WSL2 검증됨) + ROS 2 Jazzy
-- NVIDIA GPU (VRAM 6GB+, bf16 지원 권장) + PyTorch CUDA 빌드
-- Python 3.12: `transformers>=5.5` `open3d` `rosbags` `scipy` `opencv-python`
-- Intel RealSense D455 (실시간 입력 시) + `realsense2_camera`
-- **Hugging Face 계정** — [facebook/sam3](https://huggingface.co/facebook/sam3)은 gated 모델이라 페이지에서 접근 동의 후 `hf auth login` 필요
-
-## 설치
+## Quick start
 
 ```bash
-git clone https://github.com/ingon1026/roboworld.git
-cd roboworld
+git clone https://github.com/ingon1026/pose-anything.git
+cd pose-anything
 pip install --user transformers open3d rosbags scipy opencv-python
-hf auth login                      # facebook/sam3 접근 승인된 계정
+hf auth login                      # account with facebook/sam3 access
 colcon build --symlink-install
 ```
 
-## 사용법
-
 ```bash
-./run.sh                          # 실시간 카메라 (D455)
-./run.sh bags/test3               # rosbag 재생
-./run.sh bags/test3 --prompts "책,장갑"   # 무인 실행
+./run.sh                           # live RealSense camera
+./run.sh path/to/rosbag            # play a recorded bag
+./run.sh path/to/rosbag --prompts "book,glove"   # non-interactive
 ```
 
-실행하면 물체 이름 하나만 물어보고, 노드 + RViz(3D 박스·축) + 전체 크기
-디버그 창이 자동으로 뜹니다. 결과는 `output/ros_<시각>.csv`에 프레임별로 기록됩니다.
+The script asks one question (which objects to find), then starts the perception
+node, RViz (preset with 3D boxes and axes), and a full-size debug window.
+Per-frame results are logged to `output/ros_<timestamp>.csv`.
 
-mp4·CSV만 필요한 오프라인 처리:
+Offline processing (no ROS runtime — reads the bag directly, writes mp4 + CSV):
 
 ```bash
-python3 scripts/run_offline.py --bag bags/test3 --prompts "책" [--show]
+python3 scripts/run_offline.py --bag path/to/rosbag --prompts "book" --show
 ```
 
-### 프롬프트
+### Prompts
 
-SAM3 텍스트 인코더는 영어 기반입니다. 아래 한국어 단어는 자동 변환되며
-(`sam3_detector.py`의 `PROMPT_ALIASES`), 그 외 물체는 영어로 입력하세요.
+SAM 3's text encoder is English-based. These Korean words are translated
+automatically (see `PROMPT_ALIASES` in `sam3_detector.py`); use English for
+anything else:
 
-> 물통, 마우스, 필통, 노트북, 책, 스마트폰, 장갑, 천, 블록
+> 물통 · 마우스 · 필통 · 노트북 · 책 · 스마트폰 · 장갑 · 천 · 블록
 
-검출이 불안정하면 threshold보다 **단어를 먼저 바꿔보세요** — 같은 물체도
-"water bottle"(score 0.45)과 "thermos"(0.91)처럼 단어에 따라 크게 달라집니다.
+**If detection is unstable, change the word before touching the threshold.**
+The same green thermos scores 0.45 as `"water bottle"` but 0.91 as `"thermos"`.
+Prompts can be swapped at runtime:
 
-## ROS 2 인터페이스
+```bash
+ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
+```
 
-**구독**: `/camera/camera/color/image_raw`, `/camera/camera/aligned_depth_to_color/image_raw`,
-`.../camera_info`, `/perception/prompt`(std_msgs/String — 런타임 물체 교체)
+## ROS 2 interface
 
-**발행**:
+**Subscribes** — `/camera/camera/color/image_raw`, `/camera/camera/aligned_depth_to_color/image_raw`,
+`.../camera_info`, `/perception/prompt`
 
-| 토픽 | 타입 | 내용 |
+**Publishes**
+
+| Topic | Type | Content |
 |---|---|---|
-| `/perception/detections` | `vision_msgs/Detection3DArray` | 물체별 라벨·score·추적 ID·pose(중심+quaternion)·크기 |
-| `/perception/markers` | `visualization_msgs/MarkerArray` | RViz용 OBB 큐브·XYZ축·라벨 |
-| `/perception/debug_image` | `sensor_msgs/Image` | 마스크·3D박스·상태줄 오버레이 영상 |
+| `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, pose (center + quaternion), size — in `camera_color_optical_frame` |
+| `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
+| `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
 
-**주요 파라미터**: `prompts`, `score_threshold`(0.4), `detect_interval`(5, SAM 키프레임 주기),
-`max_per_prompt`(1, 물체당 트랙 수), `csv_path`, `display`
+**Parameters** — `prompts`, `score_threshold` (0.4), `detect_interval` (5, SAM keyframe period),
+`max_per_prompt` (1, tracks per prompt), `csv_path`, `display`
 
-## 파이프라인
-
-```
-텍스트 프롬프트
-      │
-색상+depth ──► [키프레임] SAM3 검출·분할 ──► IoU 매칭 (ID 유지)
-      │        [중간 프레임] 광학흐름 마스크 추적
-      │
-      └─► 마스크+depth+K ─► 포인트 역투영(MAD 필터) ─► Open3D OBB
-                                                        │
-           축 연속성·데드밴드·slerp·EMA 안정화 ◄────────┘
-                    │
-      Detection3DArray · RViz Marker · 디버그 영상 · CSV
-```
-
-## 프로젝트 구조
+## Project structure
 
 ```
-src/roboworld_perception/       ROS 2 패키지 (ament_python)
+src/roboworld_perception/         ROS 2 package (ament_python)
   roboworld_perception/
-    sam3_detector.py            SAM3 래퍼, 프롬프트 별칭
-    pipeline.py                 하이브리드 검출·추적 오케스트레이션
-    tracker.py                  IoU 트래커, 자세 안정화
-    geometry.py                 역투영, OBB, 축 매칭
-    overlay.py                  디버그 렌더링
-    perception_node.py          ROS 2 노드
-  rviz/perception.rviz          RViz 프리셋
-  test/                         단위 테스트 (pytest)
-scripts/run_offline.py          ROS 없이 bag → mp4/CSV
-run.sh                          단일 진입점
+    sam3_detector.py              SAM 3 wrapper, prompt aliases
+    pipeline.py                   hybrid detect/track orchestration
+    tracker.py                    IoU tracker, pose stabilization
+    geometry.py                   back-projection, OBB, axis matching
+    overlay.py                    debug rendering
+    perception_node.py            ROS 2 node
+  rviz/perception.rviz            RViz preset
+  test/                           unit tests (pytest, 14 cases)
+scripts/run_offline.py            bag → mp4/CSV without ROS
+run.sh                            single entry point
 ```
 
-## 로드맵
+## Acknowledgments
 
-- [ ] Docker / docker-compose 배포 환경
-- [ ] 가림(occlusion) 대응 — score 급락 시 트랙 동결
-- [ ] 칼만 필터 기반 이동 지연 보정 (로봇 그리핑 연동용)
-- [ ] 카메라→로봇 베이스 외부 캘리브레이션
+This project builds on the following open-source work:
 
-## 라이선스
+- **[SAM 3 — Segment Anything with Concepts](https://ai.meta.com/research/publications/sam-3-segment-anything-with-concepts/)**
+  (Meta AI) — open-vocabulary detection, segmentation, and tracking.
+  Used via [Hugging Face Transformers](https://github.com/huggingface/transformers)
+  (`Sam3Model`). Model weights are **not** distributed with this repository; they are
+  downloaded from [`facebook/sam3`](https://huggingface.co/facebook/sam3) under Meta's
+  own license terms after gated-access approval.
+- **[Open3D](http://www.open3d.org/)** (Zhou, Park, Koltun) — point-cloud processing
+  and oriented-bounding-box estimation.
+- **[ROS 2](https://docs.ros.org/en/jazzy/)** / **[vision_msgs](https://github.com/ros-perception/vision_msgs)** — middleware and message definitions.
+- **[librealsense / realsense-ros](https://github.com/IntelRealSense/realsense-ros)** (Intel) — D455 camera driver.
+- **[OpenCV](https://opencv.org/)** — optical flow, rendering; **[SciPy](https://scipy.org/)** — rotation math.
 
-MIT
+## License
+
+Code in this repository is released under the [MIT License](LICENSE).
+The SAM 3 model weights are governed by Meta's separate license (see above).
