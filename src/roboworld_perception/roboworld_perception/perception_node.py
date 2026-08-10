@@ -93,7 +93,8 @@ class PerceptionNode(Node):
         self.csv_writer = None
         csv_path = self.get_parameter("csv_path").value
         if csv_path:
-            self._csv_file = open(csv_path, "w", newline="")
+            # buffering=1: 노드가 SIGTERM으로 죽어도 기록이 남도록 라인 버퍼링
+            self._csv_file = open(csv_path, "w", newline="", buffering=1)
             self.csv_writer = csv.writer(self._csv_file)
             self.csv_writer.writerow(
                 ["stamp", "track_id", "label", "score", "x", "y", "z", "distance",
