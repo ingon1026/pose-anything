@@ -1,67 +1,46 @@
 #!/bin/bash
-# 대화형:   ./run.sh
-# 비대화식: ./run.sh --source live --prompts "thermos" [--mode ros]
-#           ./run.sh --source bags/test3 --prompts "책,장갑" --mode offline [--threshold 0.4]
+# 사용법:
+#   ./run.sh                                  # 실시간 카메라 (D455)
+#   ./run.sh bags/test3                       # bag 재생
+#   ./run.sh bags/test3 --prompts "책" --mode offline   # 무인 실행
+# 플래그: --prompts "a,b" --mode ros|offline --threshold 0.4
 cd "$(dirname "$0")"
 
 SOURCE="" PROMPTS="" MODE="" THRESHOLD=0.4
 while [ $# -gt 0 ]; do
   case "$1" in
-    --source)    SOURCE="$2"; shift 2 ;;
     --prompts)   PROMPTS="$2"; shift 2 ;;
     --mode)      MODE="$2"; shift 2 ;;
     --threshold) THRESHOLD="$2"; shift 2 ;;
-    *) echo "알 수 없는 인자: $1  (--source --prompts --mode --threshold)"; exit 1 ;;
+    --source)    SOURCE="$2"; shift 2 ;;   # 하위 호환
+    -*) echo "알 수 없는 인자: $1"; exit 1 ;;
+    *) SOURCE="$1"; shift ;;               # 위치 인자 = bag 경로
   esac
 done
 
-# --- 입력 소스 ---
-if [ -z "$SOURCE" ]; then
-  echo "=== 컨베이어 물체 인식 실행 ==="
-  echo
-  echo "입력 소스를 고르세요:"
-  mapfile -t BAGS < <(find . -maxdepth 3 -name metadata.yaml -printf '%h\n' 2>/dev/null | sed 's|^\./||' | sort)
-  i=1
-  for b in "${BAGS[@]}"; do echo "  $i) bag: $b"; i=$((i+1)); done
-  echo "  L) 실시간 카메라 (RealSense D455)"
-  echo "  P) bag 경로 직접 입력"
-  read -rp "선택: " sel
-  case "$sel" in
-    [Ll]) SOURCE=live ;;
-    [Pp]) read -rp "bag 경로: " SOURCE ;;
-    *) SOURCE="${BAGS[$((sel-1))]:-}"
-       [ -z "$SOURCE" ] && { echo "잘못된 선택"; exit 1; } ;;
-  esac
-fi
-if [ "$SOURCE" != "live" ] && [ ! -f "$SOURCE/metadata.yaml" ]; then
+if [ -z "$SOURCE" ] || [ "$SOURCE" = "live" ]; then
+  SOURCE=live
+  if ! lsusb 2>/dev/null | grep -qi "RealSense"; then
+    echo "RealSense 카메라가 연결되어 있지 않습니다."
+    echo "카메라를 연결하거나, bag으로 실행하세요:  ./run.sh <bag경로>"
+    exit 1
+  fi
+elif [ ! -f "$SOURCE/metadata.yaml" ]; then
   echo "bag을 찾을 수 없음: $SOURCE (metadata.yaml 없음)"; exit 1
 fi
 
-# --- 물체 (자유 텍스트) ---
 if [ -z "$PROMPTS" ]; then
-  KNOWN=$(awk '/^PROMPT_ALIASES/,/^}/' \
-    src/roboworld_perception/roboworld_perception/sam3_detector.py \
-    | sed -n 's/^\s*"\([^"]*\)".*/\1/p' | paste -sd, -)
-  echo
-  echo "감지할 물체를 입력하세요 (쉼표 구분)"
-  echo "  한글 자동 변환: $KNOWN"
-  echo "  그 외 물체는 영어로 (예: red box, screwdriver)"
-  read -rp "물체: " PROMPTS
+  read -rp "감지할 물체 (쉼표 구분): " PROMPTS
 fi
 [ -z "$PROMPTS" ] && { echo "물체를 최소 1개 입력하세요"; exit 1; }
 
-# --- 모드 ---
 [ "$SOURCE" = "live" ] && MODE=ros  # 실시간은 ROS 모드 고정
 if [ -z "$MODE" ]; then
-  echo
-  echo "실행 방식을 고르세요:"
-  echo "  1) 간단 — 결과 영상(mp4)과 CSV 생성, 처리 중 화면 표시 (추천)"
-  echo "  2) ROS — 노드 실행 + RViz, 토픽으로 발행"
+  echo "실행 방식:  1) 간단 — mp4+CSV 생성, 화면 표시   2) ROS — 노드+RViz"
   read -rp "번호 선택 [1-2]: " m
   if [ "$m" = "2" ]; then MODE=ros; else MODE=offline; fi
 fi
 
-echo
 echo ">> 소스: $SOURCE | 물체: $PROMPTS | 모드: $MODE | threshold: $THRESHOLD"
 [ "${DRY_RUN:-0}" = "1" ] && { echo "[dry-run] source=$SOURCE prompts=$PROMPTS mode=$MODE"; exit 0; }
 mkdir -p output
