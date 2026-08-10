@@ -2,9 +2,9 @@
 
 # pose-anything
 
-**Type an object's name — get its mask, track ID, and 6-DoF pose from an RGB-D camera. No training, no CAD models.**
+**Zero-shot object detection, tracking, and 6-DoF pose estimation on ROS 2.**
 
-*Open-vocabulary detection with SAM 3, hybrid optical-flow tracking, and Open3D OBB pose estimation on ROS 2.*
+*SAM 3 · Open3D · no training · no CAD models*
 
 [![SAM 3](https://img.shields.io/badge/SAM_3-Meta_AI-0467DF?logo=meta&logoColor=white)](https://github.com/facebookresearch/sam3)
 [![ROS 2](https://img.shields.io/badge/ROS_2-Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/jazzy/)
@@ -14,11 +14,6 @@
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
-
-Point the camera at a conveyor, type `"book"` (or `"책"` — Korean aliases included),
-and every frame you get the segmentation mask, a persistent track ID, the 3D center,
-width/depth/height, and roll/pitch/yaw — published as standard ROS 2 messages that
-any robot node can consume.
 
 ![Tracking three objects on a moving conveyor](docs/images/demo_tracking.png)
 
@@ -93,9 +88,13 @@ colcon build --symlink-install
 ./run.sh path/to/rosbag --prompts "book,glove"   # non-interactive
 ```
 
-The script asks one question (which objects to find), then starts the perception
-node, RViz (preset with 3D boxes and axes), and a full-size debug window.
-Per-frame results are logged to `output/ros_<timestamp>.csv`.
+The script asks one question — which objects to find. Type a name like `book`
+(or a Korean alias like `책`) and **only the prompted objects are detected and
+tracked** — one best-scoring instance per prompt, with a persistent track ID.
+Everything else in the scene is ignored.
+
+It then starts the perception node, RViz (preset with 3D boxes and axes), and a
+full-size debug window. Per-frame results are logged to `output/ros_<timestamp>.csv`.
 
 Offline processing (no ROS runtime — reads the bag directly, writes mp4 + CSV):
 
@@ -120,6 +119,8 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 ```
 
 ## ROS 2 interface
+
+![ROS 2 node graph](docs/images/rqt_graph.png)
 
 **Subscribes** — `/camera/camera/color/image_raw`, `/camera/camera/aligned_depth_to_color/image_raw`,
 `.../camera_info`, `/perception/prompt`
