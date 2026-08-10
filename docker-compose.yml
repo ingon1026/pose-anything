@@ -1,0 +1,24 @@
+services:
+  perception:
+    build: .
+    image: pose-anything
+    network_mode: host        # 호스트 ROS 노드와 DDS 통신
+    ipc: host
+    privileged: true          # RealSense USB 접근 (bag만 쓰면 제거 가능)
+    stdin_open: true
+    tty: true
+    environment:
+      - HF_TOKEN              # gated facebook/sam3 다운로드용 (호스트 env 전달)
+      - DISPLAY=${DISPLAY:-:0}
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/cache/hf   # 모델 캐시 (재다운로드 방지)
+      - ./bags:/ws/bags
+      - ./output:/ws/output
+      - /tmp/.X11-unix:/tmp/.X11-unix                # RViz·디버그 창 (headless면 불필요)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

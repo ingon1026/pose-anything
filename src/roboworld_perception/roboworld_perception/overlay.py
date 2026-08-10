@@ -4,8 +4,11 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 # cv2.putText cannot render Korean labels; use PIL with a CJK font.
-_FONT = ImageFont.truetype(
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 15)
+try:
+    _FONT = ImageFont.truetype(
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 15)
+except OSError:  # 폰트 없는 환경(미설치 컨테이너 등)에서는 기본 폰트로 동작
+    _FONT = ImageFont.load_default(15)
 
 PALETTE = [(66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53),
            (171, 71, 188), (0, 172, 193), (255, 112, 67), (124, 179, 66)]

@@ -64,6 +64,9 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 
 ## Requirements
 
+**With Docker** the host only needs an NVIDIA driver, Docker + nvidia-container-toolkit,
+and a Hugging Face account — everything below ships inside the image. For native installs:
+
 - Ubuntu 24.04 (verified on WSL2) with **ROS 2 Jazzy**
 - NVIDIA GPU with ≥ 6 GB VRAM, PyTorch CUDA build (bf16 inference)
 - Python 3.12 — `transformers>=5.5`, `open3d`, `rosbags`, `scipy`, `opencv-python`
@@ -73,6 +76,26 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
   (click *"Agree and access repository"* on the model page — approval is immediate)
 
 ## Quick start
+
+### Docker (recommended — any Ubuntu PC with an NVIDIA GPU)
+
+Requires Docker and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+```bash
+git clone https://github.com/ingon1026/pose-anything.git
+cd pose-anything
+export HF_TOKEN=hf_xxxx            # token of an account with facebook/sam3 access
+docker compose build               # ~21 GB (CUDA PyTorch)
+docker compose run --rm perception                                    # live camera
+docker compose run --rm perception ./run.sh bags/mybag --prompts "book"   # rosbag
+```
+
+Model weights are **not** baked into the image (Meta's gated license) — they are
+downloaded once on first run into a mounted cache volume and reused afterwards.
+Put rosbags under `./bags/` (mounted into the container); add `--headless` on
+machines without a display.
+
+### Native install
 
 ```bash
 git clone https://github.com/ingon1026/pose-anything.git

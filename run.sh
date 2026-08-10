@@ -7,11 +7,12 @@
 # (mp4/CSV만 뽑는 offline 처리: scripts/run_offline.py 직접 실행)
 cd "$(dirname "$0")"
 
-SOURCE="" PROMPTS="" THRESHOLD=0.4
+SOURCE="" PROMPTS="" THRESHOLD=0.4 HEADLESS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --prompts)   PROMPTS="$2"; shift 2 ;;
     --threshold) THRESHOLD="$2"; shift 2 ;;
+    --headless)  HEADLESS=1; shift ;;      # RViz·디버그 창 없이 (서버/도커)
     --source)    SOURCE="$2"; shift 2 ;;   # 하위 호환
     -*) echo "알 수 없는 인자: $1"; exit 1 ;;
     *) SOURCE="$1"; shift ;;               # 위치 인자 = bag 경로
@@ -51,18 +52,24 @@ fi
 LOG=$(mktemp)
 CSV="output/ros_$(date +%Y%m%d_%H%M%S).csv"
 echo ">> 노드 시작 (SAM3 로딩 ~40초)..."
+DISPLAY_PARAM=true
+[ "$HEADLESS" = "1" ] && DISPLAY_PARAM=false
 ros2 run roboworld_perception perception_node --ros-args \
   -p prompts:="$PROMPTS" -p score_threshold:="$THRESHOLD" \
-  -p display:=true -p csv_path:="$CSV" > "$LOG" 2>&1 &
+  -p display:=$DISPLAY_PARAM -p csv_path:="$CSV" > "$LOG" 2>&1 &
 NODE_PID=$!
 PIDS+=($NODE_PID)
 until grep -q "SAM3 ready" "$LOG"; do
   kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -5 "$LOG"; exit 1; }
   sleep 2
 done
-rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
-PIDS+=($!)
-echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"
+if [ "$HEADLESS" = "1" ]; then
+  echo ">> 준비 완료 (headless) — 토픽: /perception/detections"
+else
+  rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
+  PIDS+=($!)
+  echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"
+fi
 
 if [ "$SOURCE" = "live" ]; then
   echo ">> 실시간 실행 중 (종료: Ctrl+C)"
