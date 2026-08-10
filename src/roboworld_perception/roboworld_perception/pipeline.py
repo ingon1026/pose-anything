@@ -50,7 +50,7 @@ def _shift_mask(mask, dx, dy):
 
 
 class PerceptionPipeline:
-    def __init__(self, detector, depth_scale=0.001, ema=0.4, rot_alpha=0.5,
+    def __init__(self, detector, depth_scale=0.001, ema=0.4, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1):
         self.detector = detector

@@ -29,7 +29,8 @@ class Track:
     mask: np.ndarray | None = field(default=None, repr=False)  # 하이브리드 추적용
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 
-    def update_obb(self, obb: ObbResult | None, ema=0.4, rot_alpha=0.5):
+    def update_obb(self, obb: ObbResult | None, ema=0.4, rot_alpha=0.15,
+                   rot_deadband_deg=2.0):
         if obb is None:
             return
         if self.obb is None:
@@ -39,10 +40,18 @@ class Track:
             # ponytail: flip metric = >45deg jump of first axis after matching
             if np.dot(R[:, 0], self.obb.R[:, 0]) < np.cos(np.radians(45)):
                 self.flip_count += 1
+            # 마스크·depth 노이즈로 인한 OBB 방향 떨림 억제:
+            # 데드밴드(작은 변화는 무시) + 강한 slerp 스무딩
+            rel_trace = np.trace(self.obb.R.T @ R)
+            ang = np.degrees(np.arccos(np.clip((rel_trace - 1) / 2, -1, 1)))
+            if ang < rot_deadband_deg:
+                R_new = self.obb.R
+            else:
+                R_new = smooth_rotation(self.obb.R, R, rot_alpha)
             self.obb = ObbResult(
                 center=ema * obb.center + (1 - ema) * self.obb.center,
                 extent=ema * ext + (1 - ema) * self.obb.extent,
-                R=smooth_rotation(self.obb.R, R, rot_alpha),
+                R=R_new,
                 num_points=obb.num_points,
             )
 
