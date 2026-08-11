@@ -1,11 +1,10 @@
-import numpy as np
+from conftest import make_det
 
 from roboworld_perception.tracker import IouTracker
 
 
 def det(box, label="cup", score=0.9):
-    return {"label": label, "box": np.array(box, dtype=float), "score": score,
-            "mask": None}
+    return make_det(box, label, score)
 
 
 def test_id_persists_while_moving():

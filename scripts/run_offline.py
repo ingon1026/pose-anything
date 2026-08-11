@@ -169,7 +169,7 @@ def main():
                 args.show = False  # 디스플레이 없는 환경이면 창 없이 계속
             n += 1
             for o in objects:
-                if o.obb is None or o.occluded:  # 가림 중 stale pose는 기록 제외
+                if not o.publishable:  # 가림 중이거나 obb 없음 — 기록 제외
                     continue
                 cw.writerow(csv_row(o, stamp, proc_ms))
                 rows.append(dict(stamp=stamp, track_id=o.track_id, label=o.label,

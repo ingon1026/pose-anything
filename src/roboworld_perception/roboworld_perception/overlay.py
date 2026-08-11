@@ -23,6 +23,14 @@ def _project(points_3d, K):
     return (p[:, :2] / p[:, 2:3]).astype(int)
 
 
+def _label_y(box, n_lines, frame_h):
+    """라벨 y 위치 — 박스 위 기본, 상단에 붙으면 박스 아래로 (단일 규칙)."""
+    y = int(box[1]) - 8 - 17 * n_lines
+    if y < 2:
+        y = min(int(box[3]) + 6, frame_h - 17 * n_lines - 2)
+    return y
+
+
 def draw_status(bgr, text):
     """좌상단 상태 표시줄 (ASCII 전용, 처리 상태 확인용)."""
     cv2.putText(bgr, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -43,17 +51,18 @@ def show_window(bgr):
 
 
 def draw_objects(bgr, objects, K):
-    """objects: list of pipeline.TrackedObject. Draws in place, returns bgr."""
+    """objects: list of tracker.Track. Draws in place, returns bgr."""
     texts = []
     for obj in objects:
         color = PALETTE[obj.track_id % len(PALETTE)]
+        x1, y1 = int(obj.box[0]), int(obj.box[1])
 
-        if getattr(obj, "occluded", False):
-            # 가림 상태: 마지막 박스 위치를 회색 점선 느낌으로만 표시
-            x1, y1, x2, y2 = obj.box.astype(int)
-            cv2.rectangle(bgr, (x1, y1), (x2, y2), (128, 128, 128), 2)
-            texts.append((x1, max(2, y1 - 25),
-                          [f"{obj.label}#{obj.track_id} OCCLUDED"]))
+        if obj.occluded:
+            # 가림 상태: 마지막 박스 위치를 회색 외곽선으로만 표시
+            cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
+                          (128, 128, 128), 2)
+            lines = [f"{obj.label}#{obj.track_id} OCCLUDED"]
+            texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0]), lines))
             continue
 
         # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
@@ -63,7 +72,6 @@ def draw_objects(bgr, objects, K):
                                        cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(bgr, contours, -1, color, 2)
 
-        x1, y1 = int(obj.box[0]), int(obj.box[1])
         lines = [f"{obj.label}#{obj.track_id} {obj.score:.2f}"]
         if obj.obb is not None:
             o = obj.obb
@@ -87,10 +95,7 @@ def draw_objects(bgr, objects, K):
             lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
                       f"whd=({w:.3f},{d:.3f},{h:.3f})m",
                       f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
-        y_top = y1 - 8 - 17 * len(lines)
-        if y_top < 2:  # 박스가 화면 상단에 붙으면 라벨을 박스 아래로
-            y_top = min(int(obj.box[3]) + 6, bgr.shape[0] - 17 * len(lines) - 2)
-        texts.append((x1, y_top, lines))
+        texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0]), lines))
 
     if texts:
         pil = Image.fromarray(bgr[:, :, ::-1])

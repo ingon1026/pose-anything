@@ -10,7 +10,7 @@ offline 스크립트와 ROS 노드가 공유하는 헬퍼(이미지 디코드, C
 import cv2
 import numpy as np
 
-from .geometry import compute_obb, mask_depth_to_points
+from .geometry import compute_obb, mask_depth_to_points, masked_depth_median
 from .tracker import IouTracker
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
@@ -105,7 +105,11 @@ class PerceptionPipeline:
         self._prev_gray = None
 
     def process(self, rgb, depth, K, prompts):
-        """반환: 이번 프레임에 관측된 Track 목록 (mask/box/obb 갱신됨)."""
+        """반환: 관측된 Track + 표시용 가림(occluded) Track 목록.
+
+        pose를 소비(발행·기록)할지는 Track.publishable로 판정할 것 —
+        가림 트랙의 obb는 마지막 정상값(stale)이다.
+        """
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         keyframe = (self._frame_idx % self.detect_interval == 0
                     or self._prev_gray is None)
@@ -117,57 +121,59 @@ class PerceptionPipeline:
         self._prev_gray = gray
         return out
 
+    def _depth_ok(self, track, mask, depth, box=None):
+        """가리개 침입 검사 — 마스크 영역 depth가 트랙 기준선보다 20% 이상
+        가까우면 거부. score와 달리 외형이 닮은 가리개도 못 속인다
+        (test4 실측: 정상 0.92m, 가림 시 최대 0.55m까지 침입)."""
+        if track.depth_ema == 0:
+            return True  # 기준선 미형성 — 판단 불가, 통과
+        z = masked_depth_median(mask, depth, self.depth_scale, box)
+        return z is None or z >= 0.8 * track.depth_ema
+
     def _detect_frame(self, rgb, depth, K, prompts):
         detections = self.detector.detect(rgb, prompts)
-        pairs = self.tracker.update(detections)
+        pairs = self.tracker.update(
+            detections, validate=lambda t, d: self._depth_ok(t, d["mask"], depth,
+                                                             d["box"]))
         out = []
         for track, det in pairs:
-            if track.occluded:  # 부분 가림: 오염된 마스크로 pose 갱신 금지
-                out.append(track)
-                continue
-            prev_mask, prev_box = track.mask, track.box.copy()
-            track.mask = det["mask"]
-            self._update_geometry(track, depth, K)
-            if track.occluded:  # depth 침입 판정 → 오염된 mask/box 롤백
-                track.mask, track.box = prev_mask, prev_box
+            if not track.occluded:  # 검증 통과한 관측만 mask·pose 커밋
+                track.mask = det["mask"]
+                self._update_geometry(track, depth, K)
             out.append(track)
-        # 완전 가림으로 동결된 트랙도 표시용으로 내보낸다 (pose 발행은 소비자가 차단)
-        seen = {t.track_id for t in out}
-        out += [t for t in self.tracker.tracks
-                if t.occluded and t.track_id not in seen]
-        return out
+        return self._with_frozen(out)
 
     def _track_frame(self, gray, depth, K):
         out = []
         for track in self.tracker.tracks:
-            if track.occluded:  # 가림 중: 광학흐름이 가리개를 따라가므로 전파 금지
-                out.append(track)
+            if track.occluded or track.mask is None or track.missed > 0:
                 continue
-            if track.mask is None or track.missed > 0:
+            # 흐름 계산 전에 현재 위치에서 침입부터 확인 — 가리개가 도착한
+            # 프레임의 LK·역투영 비용을 건너뛰고, 흐름이 가리개를 따라가는
+            # 것도 원천 차단
+            if not self._depth_ok(track, track.mask, depth, track.box):
+                track.flag_occluded()
                 continue
-            prev_mask, prev_box = track.mask, track.box.copy()
             flow = propagate_mask(self._prev_gray, gray, track.mask, track.box)
             if flow is not None:
                 dx, dy = flow
                 track.mask = _shift_mask(track.mask, dx, dy)
                 track.box = track.box + np.array([dx, dy, dx, dy])
             self._update_geometry(track, depth, K)
-            if track.occluded:  # depth 침입 판정 → 가리개 따라간 이동 롤백
-                track.mask, track.box = prev_mask, prev_box
             out.append(track)
-        return out
+        return self._with_frozen(out)
+
+    def _with_frozen(self, out):
+        """가림 트랙을 표시용으로 덧붙인다 — 소비자는 Track.publishable로 거른다."""
+        seen = {t.track_id for t in out}
+        return out + [t for t in self.tracker.tracks
+                      if t.occluded and t.track_id not in seen]
 
     def _update_geometry(self, track, depth, K):
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
-        # depth 침입 감지: 마스크 영역이 평소보다 20% 이상 가까워지면
-        # 가리개가 물체 위를 지나는 중 (score와 달리 외형이 닮아도 안 속음.
-        # test4 실측: 정상 0.92m, 가림 시 최대 0.55m까지 침입)
-        if len(points) > 0:
-            z_med = float(np.median(points[:, 2]))
-            if track.depth_ema > 0 and z_med < 0.8 * track.depth_ema:
-                track.occluded = True
-                return  # 오염된 depth로 OBB 갱신 금지
-            track.depth_ema = z_med if track.depth_ema == 0 else \
-                0.9 * track.depth_ema + 0.1 * z_med
+        z = masked_depth_median(track.mask, depth, self.depth_scale, track.box)
+        if z is not None:  # 정상 관측만 여기 도달 — 기준선 갱신
+            track.depth_ema = z if track.depth_ema == 0 else \
+                0.9 * track.depth_ema + 0.1 * z
         track.update_obb(compute_obb(points), self.ema, self.rot_alpha)

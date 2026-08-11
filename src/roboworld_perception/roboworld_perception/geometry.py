@@ -64,6 +64,27 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
     return np.column_stack([x, y, z])
 
 
+def masked_depth_median(mask, depth, depth_scale=0.001, box=None,
+                        z_range=(0.10, 3.0)):
+    """마스크 영역 depth 중앙값(m). "물체 깊이"의 단일 정의 —
+    가리개 침입 판정과 depth 기준선(EMA)이 모두 이것을 쓴다.
+
+    box(xyxy)가 있으면 그 ROI만 스캔한다. 유효 픽셀이 부족하면 None.
+    """
+    if box is not None:
+        y0, x0 = max(0, int(box[1])), max(0, int(box[0]))
+        y1, x1 = int(box[3]) + 1, int(box[2]) + 1
+        z = depth[y0:y1, x0:x1][mask[y0:y1, x0:x1]].astype(np.float64)
+    else:
+        z = depth[mask].astype(np.float64)
+    if depth.dtype != np.float32 and depth.dtype != np.float64:
+        z *= depth_scale
+    z = z[(z > z_range[0]) & (z < z_range[1])]
+    if len(z) < 50:
+        return None
+    return float(np.median(z))
+
+
 def compute_obb(points, voxel=0.005):
     """PCA-based oriented bounding box via Open3D. Returns None if degenerate."""
     if len(points) < 30:
