@@ -28,6 +28,7 @@ class Track:
     age: int = 0
     mask: np.ndarray | None = field(default=None, repr=False)  # 하이브리드 추적용
     score_ema: float = 0.0   # 정상 score 기준선 (부분 가림 판별용)
+    depth_ema: float = 0.0   # 정상 depth 기준선(m) — 가리개 침입 판별용
     occluded: bool = False   # 완전/부분 가림 상태 — pose 발행 중단
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 

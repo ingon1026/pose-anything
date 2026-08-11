@@ -125,8 +125,11 @@ class PerceptionPipeline:
             if track.occluded:  # 부분 가림: 오염된 마스크로 pose 갱신 금지
                 out.append(track)
                 continue
+            prev_mask, prev_box = track.mask, track.box.copy()
             track.mask = det["mask"]
             self._update_geometry(track, depth, K)
+            if track.occluded:  # depth 침입 판정 → 오염된 mask/box 롤백
+                track.mask, track.box = prev_mask, prev_box
             out.append(track)
         # 완전 가림으로 동결된 트랙도 표시용으로 내보낸다 (pose 발행은 소비자가 차단)
         seen = {t.track_id for t in out}
@@ -142,16 +145,29 @@ class PerceptionPipeline:
                 continue
             if track.mask is None or track.missed > 0:
                 continue
+            prev_mask, prev_box = track.mask, track.box.copy()
             flow = propagate_mask(self._prev_gray, gray, track.mask, track.box)
             if flow is not None:
                 dx, dy = flow
                 track.mask = _shift_mask(track.mask, dx, dy)
                 track.box = track.box + np.array([dx, dy, dx, dy])
             self._update_geometry(track, depth, K)
+            if track.occluded:  # depth 침입 판정 → 가리개 따라간 이동 롤백
+                track.mask, track.box = prev_mask, prev_box
             out.append(track)
         return out
 
     def _update_geometry(self, track, depth, K):
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
+        # depth 침입 감지: 마스크 영역이 평소보다 20% 이상 가까워지면
+        # 가리개가 물체 위를 지나는 중 (score와 달리 외형이 닮아도 안 속음.
+        # test4 실측: 정상 0.92m, 가림 시 최대 0.55m까지 침입)
+        if len(points) > 0:
+            z_med = float(np.median(points[:, 2]))
+            if track.depth_ema > 0 and z_med < 0.8 * track.depth_ema:
+                track.occluded = True
+                return  # 오염된 depth로 OBB 갱신 금지
+            track.depth_ema = z_med if track.depth_ema == 0 else \
+                0.9 * track.depth_ema + 0.1 * z_med
         track.update_obb(compute_obb(points), self.ema, self.rot_alpha)
