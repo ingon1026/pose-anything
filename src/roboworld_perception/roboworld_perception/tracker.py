@@ -27,6 +27,8 @@ class Track:
     flip_count: int = 0
     age: int = 0
     mask: np.ndarray | None = field(default=None, repr=False)  # 하이브리드 추적용
+    score_ema: float = 0.0   # 정상 score 기준선 (부분 가림 판별용)
+    occluded: bool = False   # 완전/부분 가림 상태 — pose 발행 중단
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 
     def update_obb(self, obb: ObbResult | None, ema=0.4, rot_alpha=0.15,
@@ -57,9 +59,15 @@ class Track:
 
 
 class IouTracker:
-    def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0):
+    def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0,
+                 occlusion_hold=12):
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
+        # 가림 대응: missed가 max_missed를 넘으면 삭제 대신 "동결" —
+        # 좌표 발행은 멈추되 트랙을 살려두고, 재등장 시 같은 자리 IoU
+        # 매칭으로 ID를 복귀시킨다. 동결까지 합쳐 max_missed+occlusion_hold
+        # 회 연속 미검출이면 그때 삭제. (test4 실측: 가림 최대 2.6초 소실)
+        self.occlusion_hold = occlusion_hold
         # 라벨당 트랙 수 제한 (0=무제한). 검출 단계에서 top-1을 자르면
         # score 역전 시 다른 인스턴스로 튀어 ID가 끊기므로, 후보는 전부
         # 받아 기존 트랙과 먼저 매칭하고 "새 트랙 생성"만 제한한다.
@@ -92,17 +100,40 @@ class IouTracker:
             used_t.add(ti)
             used_d.add(di)
             t = self.tracks[ti]
-            t.box = np.asarray(detections[di]["box"], dtype=float)
             t.score = detections[di]["score"]
             t.missed = 0
             t.age += 1
+            # 부분 가림 판별: 트랙의 평소 score 대비 절반 미만이면
+            # 마스크가 오염됐을 가능성이 높다 (test4 실측: 0.73 -> 0.15~0.35)
+            t.occluded = t.score_ema > 0 and t.score < 0.5 * t.score_ema
+            if not t.occluded:
+                # 가림 중엔 box도 오염 조각일 수 있어 마지막 정상 box를 유지
+                t.box = np.asarray(detections[di]["box"], dtype=float)
+                t.score_ema = t.score if t.score_ema == 0 else \
+                    0.9 * t.score_ema + 0.1 * t.score
             pairs.append((t, detections[di]))
 
         unmatched = sorted((d for di, d in enumerate(detections) if di not in used_d),
                            key=lambda d: -d["score"])
         for d in unmatched:
-            alive = sum(1 for t in self.tracks
-                        if t.label == d["label"] and t.missed <= self.max_missed)
+            # 가림 후 재등장 구조(rescue): IoU 매칭에 실패한 검출은 새 트랙을
+            # 만들기 전에, 같은 라벨의 동결 트랙에 우선 복귀시킨다 (ID 유지)
+            frozen = [t for t in self.tracks
+                      if t.label == d["label"] and t.missed > self.max_missed
+                      and t not in (p[0] for p in pairs)]
+            if frozen:
+                c = np.asarray(d["box"], dtype=float)
+                cx, cy = (c[0] + c[2]) / 2, (c[1] + c[3]) / 2
+                t = min(frozen, key=lambda t: (cx - (t.box[0] + t.box[2]) / 2) ** 2
+                        + (cy - (t.box[1] + t.box[3]) / 2) ** 2)
+                t.box = c
+                t.score = d["score"]
+                t.missed = 0
+                t.age += 1
+                t.occluded = False
+                pairs.append((t, d))
+                continue
+            alive = sum(1 for t in self.tracks if t.label == d["label"])
             if self.max_per_label > 0 and alive >= self.max_per_label:
                 continue
             t = Track(self._next_id, d["label"], np.asarray(d["box"], dtype=float),
@@ -113,6 +144,10 @@ class IouTracker:
 
         for ti in range(n_old):
             if ti not in used_t:
-                self.tracks[ti].missed += 1
-        self.tracks = [t for t in self.tracks if t.missed <= self.max_missed]
+                t = self.tracks[ti]
+                t.missed += 1
+                if t.missed > self.max_missed:
+                    t.occluded = True  # 동결: 유지하되 발행·전파 중단
+        self.tracks = [t for t in self.tracks
+                       if t.missed <= self.max_missed + self.occlusion_hold]
         return pairs

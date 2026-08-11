@@ -27,7 +27,8 @@ def test_two_objects_keep_distinct_ids():
 
 
 def test_track_dropped_after_max_missed():
-    tr = IouTracker(max_missed=2)
+    # occlusion_hold=0 이면 가림 유예 없이 기존처럼 즉시 삭제
+    tr = IouTracker(max_missed=2, occlusion_hold=0)
     tr.update([det([100, 100, 200, 180])])
     for _ in range(3):
         tr.update([])

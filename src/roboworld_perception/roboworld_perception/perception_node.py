@@ -148,7 +148,7 @@ class PerceptionNode(Node):
 
         stamp_s = stamp.sec + stamp.nanosec * 1e-9
         for obj in objects:
-            if obj.obb is None:
+            if obj.obb is None or obj.occluded:  # 가림 중엔 stale pose 발행 금지
                 continue
             o = obj.obb
             qx, qy, qz, qw = o.quat_xyzw

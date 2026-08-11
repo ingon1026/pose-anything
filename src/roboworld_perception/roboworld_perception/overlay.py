@@ -48,6 +48,14 @@ def draw_objects(bgr, objects, K):
     for obj in objects:
         color = PALETTE[obj.track_id % len(PALETTE)]
 
+        if getattr(obj, "occluded", False):
+            # 가림 상태: 마지막 박스 위치를 회색 점선 느낌으로만 표시
+            x1, y1, x2, y2 = obj.box.astype(int)
+            cv2.rectangle(bgr, (x1, y1), (x2, y2), (128, 128, 128), 2)
+            texts.append((x1, max(2, y1 - 25),
+                          [f"{obj.label}#{obj.track_id} OCCLUDED"]))
+            continue
+
         # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
         bgr[obj.mask] = (0.35 * np.array(color) + 0.65 * bgr[obj.mask]) \
             .astype(np.uint8)

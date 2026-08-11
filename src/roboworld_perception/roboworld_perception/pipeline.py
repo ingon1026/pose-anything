@@ -122,14 +122,24 @@ class PerceptionPipeline:
         pairs = self.tracker.update(detections)
         out = []
         for track, det in pairs:
+            if track.occluded:  # 부분 가림: 오염된 마스크로 pose 갱신 금지
+                out.append(track)
+                continue
             track.mask = det["mask"]
             self._update_geometry(track, depth, K)
             out.append(track)
+        # 완전 가림으로 동결된 트랙도 표시용으로 내보낸다 (pose 발행은 소비자가 차단)
+        seen = {t.track_id for t in out}
+        out += [t for t in self.tracker.tracks
+                if t.occluded and t.track_id not in seen]
         return out
 
     def _track_frame(self, gray, depth, K):
         out = []
         for track in self.tracker.tracks:
+            if track.occluded:  # 가림 중: 광학흐름이 가리개를 따라가므로 전파 금지
+                out.append(track)
+                continue
             if track.mask is None or track.missed > 0:
                 continue
             flow = propagate_mask(self._prev_gray, gray, track.mask, track.box)
