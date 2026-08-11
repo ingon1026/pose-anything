@@ -10,7 +10,8 @@ offline 스크립트와 ROS 노드가 공유하는 헬퍼(이미지 디코드, C
 import cv2
 import numpy as np
 
-from .geometry import compute_obb, mask_depth_to_points, masked_depth_median
+from .geometry import (INTRUSION_RATIO, compute_obb, mask_depth_to_points,
+                       masked_depth_median)
 from .tracker import IouTracker
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
@@ -121,20 +122,26 @@ class PerceptionPipeline:
         self._prev_gray = gray
         return out
 
+    def _z_ok(self, track, z):
+        """가리개 침입 검사 — 마스크 depth가 기준선의 INTRUSION_RATIO보다
+        가까우면 거부. score와 달리 외형이 닮은 가리개도 못 속인다."""
+        return (track.depth_ema == 0 or z is None
+                or z >= INTRUSION_RATIO * track.depth_ema)
+
     def _depth_ok(self, track, mask, depth, box=None):
-        """가리개 침입 검사 — 마스크 영역 depth가 트랙 기준선보다 20% 이상
-        가까우면 거부. score와 달리 외형이 닮은 가리개도 못 속인다
-        (test4 실측: 정상 0.92m, 가림 시 최대 0.55m까지 침입)."""
         if track.depth_ema == 0:
-            return True  # 기준선 미형성 — 판단 불가, 통과
-        z = masked_depth_median(mask, depth, self.depth_scale, box)
-        return z is None or z >= 0.8 * track.depth_ema
+            return True  # 기준선 미형성 — depth 계산 자체를 생략
+        return self._z_ok(track, masked_depth_median(mask, depth,
+                                                     self.depth_scale, box))
 
     def _detect_frame(self, rgb, depth, K, prompts):
         detections = self.detector.detect(rgb, prompts)
+        for d in detections:  # 매칭 비용·검증이 공유할 depth를 1회만 계산
+            d["z"] = masked_depth_median(d["mask"], depth, self.depth_scale,
+                                         d["box"])
         pairs = self.tracker.update(
-            detections, validate=lambda t, d: self._depth_ok(t, d["mask"], depth,
-                                                             d["box"]))
+            detections, validate=lambda t, d: self._z_ok(t, d["z"]),
+            high_score=getattr(self.detector, "threshold", None))
         out = []
         for track, det in pairs:
             if not track.occluded:  # 검증 통과한 관측만 mask·pose 커밋

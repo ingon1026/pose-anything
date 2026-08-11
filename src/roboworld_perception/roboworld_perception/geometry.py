@@ -64,6 +64,11 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
     return np.column_stack([x, y, z])
 
 
+# 가리개 침입 판정 비율 — 마스크 depth가 기준선의 이 비율보다 가까우면 가림
+# (test4 실측: 정상 0.92m, 침입 시 0.55m). 매칭 비용·검증이 공유하는 단일 정의.
+INTRUSION_RATIO = 0.8
+
+
 def masked_depth_median(mask, depth, depth_scale=0.001, box=None,
                         z_range=(0.10, 3.0)):
     """마스크 영역 depth 중앙값(m). "물체 깊이"의 단일 정의 —

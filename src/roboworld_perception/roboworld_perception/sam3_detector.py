@@ -43,6 +43,10 @@ class Sam3Detector:
             self.model = torch.compile(self.model)
         self.processor = Sam3Processor.from_pretrained(model_id, **proc_kwargs)
         self.threshold = threshold
+        # 연관(association)용 하한 — threshold 미만~이 값 이상의 저점수 검출도
+        # 반환한다. 트래커가 기존 트랙 유지에만 쓰고 새 트랙은 못 만든다
+        # (ByteTrack의 저점수 2차 매칭). 부분 가림 추적이 끊기지 않게 함.
+        self.assoc_threshold = min(0.1, threshold)
         self.mask_threshold = mask_threshold
         self._warned = set()
         self._text_cache = {}  # 프롬프트별 토큰화 결과 (키프레임마다 재계산 방지)
@@ -76,7 +80,7 @@ class Sam3Detector:
             outputs = self.model(vision_embeds=vision_embeds,
                                  **self._text_inputs(text))
             results = self.processor.post_process_instance_segmentation(
-                outputs, threshold=self.threshold,
+                outputs, threshold=self.assoc_threshold,
                 mask_threshold=self.mask_threshold, target_sizes=target_sizes)[0]
             detections.extend({
                 "label": label,

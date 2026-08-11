@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .geometry import ObbResult, match_axes, smooth_rotation
+from .geometry import INTRUSION_RATIO, ObbResult, match_axes, smooth_rotation
 
 
 def box_iou(a, b):
@@ -14,6 +14,22 @@ def box_iou(a, b):
     area_a = (a[2] - a[0]) * (a[3] - a[1])
     area_b = (b[2] - b[0]) * (b[3] - b[1])
     return inter / (area_a + area_b - inter + 1e-9)
+
+
+def _expand(box, k):
+    """박스를 중심 기준 k배로 확장 (C-BIoU의 buffered box)."""
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    hw, hh = (box[2] - box[0]) / 2 * k, (box[3] - box[1]) / 2 * k
+    return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+
+def _depth_conflict(track, det):
+    """검출의 depth가 트랙 기준선보다 침입 비율 이상 가까우면 True —
+    가리개일 가능성이 높아 매칭 후보에서 제외한다 (PD-SORT의 depth 비용을
+    실제 RGB-D로 구현). det["z"]는 pipeline이 채운다; 없으면 판단 안 함."""
+    z = det.get("z")
+    return (track.depth_ema > 0 and z is not None
+            and z < INTRUSION_RATIO * track.depth_ema)
 
 
 @dataclass
@@ -96,7 +112,7 @@ class Track:
 
 class IouTracker:
     def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0,
-                 occlusion_hold=12):
+                 occlusion_hold=12, rescue_buffer=2.5):
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
         # 가림 대응: missed가 max_missed를 넘으면 삭제 대신 "동결" —
@@ -108,6 +124,9 @@ class IouTracker:
         # score 역전 시 다른 인스턴스로 튀어 ID가 끊기므로, 후보는 전부
         # 받아 기존 트랙과 먼저 매칭하고 "새 트랙 생성"만 제한한다.
         self.max_per_label = max_per_label
+        # rescue 매칭 범위 — 박스를 이 배율로 확장한 buffered IoU가 겹쳐야
+        # 복귀 허용 (C-BIoU). 무제한 최근접의 원거리 오매칭을 막는다.
+        self.rescue_buffer = rescue_buffer
         self.tracks: list[Track] = []
         self._next_id = 1
 
@@ -115,52 +134,83 @@ class IouTracker:
         self.tracks = []
         self._next_id = 1
 
-    def update(self, detections, validate=None):
-        """detections: list of dicts with keys label, box (xyxy), score.
-
-        validate(track, det) -> bool: 매칭된 검출을 수락하기 전 외부 검증
-        (예: depth 침입). 실패하면 관측을 커밋하지 않고 가림으로 처리한다 —
-        "커밋 후 롤백"이 아니라 "수락 전 검증"이라 트랙 상태가 오염될
-        틈이 없다. Returns list of (track, detection) pairs.
-        """
-        pairs = []
-        n_old = len(self.tracks)  # 이 아래에서 추가되는 새 트랙과 구분
+    def _greedy_match(self, det_pool, used_t, exclude_depth_conflict=True):
+        """같은 라벨 greedy IoU 매칭 — (track_idx, det) 쌍을 yield."""
         candidates = [
-            (box_iou(t.box, d["box"]), ti, di)
+            (box_iou(t.box, d["box"]), ti, d)
             for ti, t in enumerate(self.tracks)
-            for di, d in enumerate(detections)
-            if t.label == d["label"]
+            for d in det_pool
+            if t.label == d["label"] and ti not in used_t
+            and not (exclude_depth_conflict and _depth_conflict(t, d))
         ]
-        used_t, used_d = set(), set()
-        for iou, ti, di in sorted(candidates, key=lambda c: -c[0]):
-            if iou < self.iou_threshold or ti in used_t or di in used_d:
+        used_d = set()
+        for iou, ti, d in sorted(candidates, key=lambda c: -c[0]):
+            if iou < self.iou_threshold or ti in used_t or id(d) in used_d:
                 continue
             used_t.add(ti)
-            used_d.add(di)
+            used_d.add(id(d))
+            yield ti, d
+
+    def update(self, detections, validate=None, high_score=None):
+        """detections: list of dicts with keys label, box (xyxy), score
+        (+ optional "z": 마스크 depth 중앙값 — 매칭 비용에 반영됨).
+
+        validate(track, det) -> bool: 관측 수락 전 외부 검증(depth 침입 등).
+        실패 시 커밋 없이 가림 처리 — 트랙 상태가 오염될 틈이 없다.
+
+        high_score: 지정 시 2-pass 매칭(ByteTrack) — 이 값 미만 저점수
+        검출은 기존 트랙 유지에만 쓰고(가림 관측), 새 트랙·rescue는 불가.
+        Returns list of (track, detection) pairs.
+        """
+        if high_score is None:
+            high, low = list(detections), []
+        else:
+            high = [d for d in detections if d["score"] >= high_score]
+            low = [d for d in detections if d["score"] < high_score]
+
+        pairs = []
+        n_old = len(self.tracks)  # 이 아래에서 추가되는 새 트랙과 구분
+        used_t = set()
+
+        # 1차: 고점수 검출 — 정상 관측 (depth 충돌 후보는 매칭에서 제외돼
+        # 가리개가 진짜 검출의 매칭을 뺏지 못한다)
+        matched_high = set()
+        for ti, d in self._greedy_match(high, used_t):
             t = self.tracks[ti]
-            if validate is not None and not validate(t, detections[di]):
+            matched_high.add(id(d))
+            if validate is not None and not validate(t, d):
                 t.missed = 0       # 자리에 뭔가 있음은 확인됨 — 동결 타이머만 정지
                 t.flag_occluded()  # 검증 실패: box·score·EMA 어느 것도 커밋 안 함
             else:
-                t.observe(detections[di])
-            pairs.append((t, detections[di]))
+                t.observe(d)
+            pairs.append((t, d))
 
-        unmatched = sorted((d for di, d in enumerate(detections) if di not in used_d),
+        # 2차: 저점수 검출 — 부분 가림 중인 트랙의 생존 신호로만 사용
+        for ti, d in self._greedy_match(low, used_t,
+                                        exclude_depth_conflict=False):
+            t = self.tracks[ti]
+            t.missed = 0
+            t.flag_occluded()  # 저점수 = 오염 가능성 — 커밋 없이 유지만
+            pairs.append((t, d))
+
+        # rescue·새 트랙은 고점수 검출만 가능
+        unmatched = sorted((d for d in high if id(d) not in matched_high),
                            key=lambda d: -d["score"])
         for d in unmatched:
-            # 가림 후 재등장 구조(rescue): IoU 매칭에 실패한 검출은 새 트랙을
-            # 만들기 전에, 같은 라벨의 동결 트랙에 우선 복귀시킨다 (ID 유지)
-            frozen = [t for t in self.tracks
+            # 가림 후 재등장 구조(rescue): buffered IoU(C-BIoU)로 범위를
+            # 한정해 동결 트랙에 복귀시킨다 — 원거리 오매칭 방지
+            frozen = [(ti, t) for ti, t in enumerate(self.tracks)
                       if t.label == d["label"] and t.missed > self.max_missed]
             if frozen:
-                c = np.asarray(d["box"], dtype=float)
-                cx, cy = (c[0] + c[2]) / 2, (c[1] + c[3]) / 2
-                t = min(frozen, key=lambda t: (cx - (t.box[0] + t.box[2]) / 2) ** 2
-                        + (cy - (t.box[1] + t.box[3]) / 2) ** 2)
-                if validate is None or validate(t, d):
+                eb = _expand(d["box"], self.rescue_buffer)
+                ti, t = max(frozen, key=lambda f: box_iou(
+                    _expand(f[1].box, self.rescue_buffer), eb))
+                if box_iou(_expand(t.box, self.rescue_buffer), eb) > 0 and \
+                        (validate is None or validate(t, d)):
                     t.reactivate(d)
+                    used_t.add(ti)
                     pairs.append((t, d))
-                continue  # 검증 실패면 동결 유지 (가리개를 물체로 오인 방지)
+                continue  # 범위 밖·검증 실패면 동결 유지
             alive = sum(1 for t in self.tracks if t.label == d["label"])
             if self.max_per_label > 0 and alive >= self.max_per_label:
                 continue
