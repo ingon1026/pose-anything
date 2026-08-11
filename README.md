@@ -50,6 +50,12 @@ new OBB against the previous frame's axes, ignores sub-2° jitter (deadband), an
 slerps the rest — bringing yaw noise down from 3.5° to **0.94° per frame** with zero
 90°/180° axis flips.
 
+Occlusions are caught by two independent signals — detection-score collapse
+relative to the track's own baseline, and **depth intrusion** in the mask region
+(an occluder is always closer to the camera than the object, so it can't be
+fooled by look-alike appearance). Occluded tracks are frozen instead of deleted,
+stale poses are never published, and the track is re-identified on reappearance.
+
 ## Measured results
 
 Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not included in this repo):
@@ -60,6 +66,7 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 | OBB size vs. real objects | within ±1 cm |
 | Center jitter (static objects) | ≤ 1.3 mm std |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
+| Occlusion robustness (hand/object passing over, 29 events) | IDs survive all occlusions; stale poses suppressed; pose resumes ≈ 0.3 s (median) after reappearance |
 | Throughput (3 prompts, RTX 4070 Ti) | ~9 FPS |
 
 ## Requirements
