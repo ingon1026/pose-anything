@@ -9,9 +9,10 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, TransformStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import ColorRGBA, String
 from vision_msgs.msg import (Detection3D, Detection3DArray,
@@ -51,6 +52,25 @@ class PerceptionNode(Node):
                                "/camera/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("info_topic", "/camera/camera/color/camera_info")
         self.declare_parameter("csv_path", "")
+        # 카메라가 "위(1m)에서 아래를 본다"는 world TF. RealSense TF 트리의
+        # 뿌리(camera_link) 위에 붙인다 — optical frame에 직접 붙이면 bag이
+        # 함께 녹화한 내부 트리와 부모가 둘이 되어 TF가 깨진다. 실제 로봇
+        # TF 트리와 통합할 때는 이 파라미터를 꺼서 충돌을 피한다.
+        self.declare_parameter("publish_world_tf", True)
+        if self.get_parameter("publish_world_tf").value:
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = "world"
+            t.child_frame_id = "camera_link"
+            t.transform.translation.z = 1.0  # 카메라 높이 (시각화용 공칭값)
+            # Rz(90°)·Ry(90°): 수직 하방 시선 + 영상 우/하 = world +X/−Y —
+            # RViz TopDownOrtho(위에서 보기)가 카메라 영상과 같은 방향이 된다
+            (t.transform.rotation.x, t.transform.rotation.y,
+             t.transform.rotation.z, t.transform.rotation.w) = \
+                (-0.5, 0.5, 0.5, 0.5)
+            # latched 발행자는 살아 있어야 늦게 켠 RViz도 받는다 — 노드에 보관
+            self._tf_bcast = StaticTransformBroadcaster(self)
+            self._tf_bcast.sendTransform(t)
 
         self.prompts = parse_prompts(self.get_parameter("prompts").value)
         threshold = self.get_parameter("score_threshold").value
