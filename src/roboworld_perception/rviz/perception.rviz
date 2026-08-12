@@ -48,7 +48,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 38; 40; 46
-    Fixed Frame: camera_color_optical_frame
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:
@@ -57,17 +57,26 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/Orbit
-      Distance: 1.8
-      Focal Point:
-        X: 0
-        Y: 0
-        Z: 1.2
+      # 위에서 수직으로 내려다보는 직교 시점 — 카메라 영상과 좌우·상하가
+      # 그대로 일치한다 (world = 광학 좌표계를 Rx(180°)로 세운 것)
+      Class: rviz_default_plugins/TopDownOrtho
+      Angle: 0
       Name: Current View
-      Pitch: -0.6
-      Yaw: 4.2
-      Value: Orbit (rviz)
-    Saved: ~
+      Scale: 450
+      X: 0
+      Y: 0
+      Value: TopDownOrtho (rviz)
+    Saved:
+      - Class: rviz_default_plugins/Orbit
+        Distance: 1.8
+        Focal Point:
+          X: 0
+          Y: 0
+          Z: 0.1
+        Name: 자유 궤도
+        Pitch: 0.9
+        Yaw: 4.71
+        Value: Orbit (rviz)
 Window Geometry:
   Displays:
     collapsed: false

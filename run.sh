@@ -90,6 +90,14 @@ done
 if [ "$HEADLESS" = "1" ]; then
   echo ">> 준비 완료 (headless) — 토픽: /perception/detections"
 else
+  # 카메라가 "아래를 보고 있다"는 사실을 TF로 제공 (world 기준 높이 1m,
+  # 광학 Z=아래) — 이게 없으면 RViz가 광학 좌표계를 그대로 세계로 그려서
+  # 시점에 따라 장면이 좌우 거울상으로 보인다. 시각화 전용이라 headless 제외.
+  setsid ros2 run tf2_ros static_transform_publisher \
+    --x 0 --y 0 --z 1.0 --roll 3.141593 --pitch 0 --yaw 0 \
+    --frame-id world --child-frame-id camera_color_optical_frame \
+    > /dev/null 2>&1 &
+  PIDS+=($!)
   setsid rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
   PIDS+=($!)
   echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"
