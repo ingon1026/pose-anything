@@ -15,16 +15,26 @@
 
 </div>
 
+<table>
+<tr>
+<td width="56%"><img src="docs/images/demo_occlusion.gif" alt="Debug overlay: occlusion handling"/></td>
+<td width="44%"><img src="docs/images/demo_markers_3d.gif" alt="Published 3D poses (Detection3DArray)"/></td>
+</tr>
+</table>
+
+<sub>**Same 10 seconds, two views.** Left — the debug overlay: three prompted objects
+(`black bag`, `keyboard`, `book`) tracked with masks, 3D boxes, and local axes; when a
+look-alike occluder sweeps over them, the last good box is held greyed-out instead of
+being corrupted. Right — what a robot actually receives on `/perception/detections`:
+during occlusion the unreliable pose is **withheld entirely** (a per-track Kalman filter
+χ²-rejects the corrupted observations), and publishing resumes the moment the object
+reappears — same track IDs throughout.</sub>
+
 ![Tracking three objects on a moving conveyor](docs/images/demo_tracking.png)
 
 <sub>**Moving conveyor, three text prompts** (`블록`/block, `책`/book, `장갑`/glove) — each object keeps
-a single track ID for the entire 20-second sequence with zero axis flips. Overlay shows mask,
-projected 3D bounding box, local XYZ axes, distance, size, and RPY per object.</sub>
-
-![Multi-object detection on a static scene](docs/images/demo_static.png)
-
-<sub>**Static scene, four prompts** — thermos, laptop, book, smartphone. Estimated OBB sizes match
-the real objects within ±1 cm.</sub>
+a single track ID for the entire 20-second sequence with zero axis flips. Estimated OBB sizes
+match the real objects within ±1 cm.</sub>
 
 ## How it works
 
@@ -118,7 +128,10 @@ machines without a display.
 ```bash
 git clone https://github.com/ingon1026/pose-anything.git
 cd pose-anything
-pip install --user transformers open3d rosbags scipy opencv-python
+pip install --user --break-system-packages \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install --user --break-system-packages \
+    "transformers>=5.5" open3d rosbags scipy opencv-python pillow
 hf auth login                      # account with facebook/sam3 access
 colcon build --symlink-install
 ```
@@ -170,12 +183,30 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 
 | Topic | Type | Content |
 |---|---|---|
-| `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, pose (center + quaternion), size — in `camera_color_optical_frame` |
+| `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, pose (center + quaternion + position covariance), size — in the camera optical frame reported by `camera_info` |
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
 
 **Parameters** — `prompts`, `score_threshold` (0.4), `detect_interval` (5, SAM keyframe period),
-`max_per_prompt` (1, tracks per prompt), `csv_path`, `display`
+`max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
+`publish_world_tf` (true — camera-above-belt TF for RViz; disable when integrating a real robot TF tree)
+
+What a consumer actually receives (captured from a real run — note the per-axis
+position variance filled in by the fusion filter, ready for confidence-gated grasping):
+
+```yaml
+# ros2 topic echo /perception/detections --once   (truncated)
+detections:
+- results:
+  - hypothesis: {class_id: black bag, score: 0.914}
+    pose:
+      pose:
+        position: {x: -0.488, y: 0.053, z: 0.894}
+        orientation: {x: -0.112, y: -0.103, z: -0.641, w: 0.753}
+      covariance: [7.7e-05, 0, 0, ...,  2.7e-04, ...,  2.8e-05, ...]  # σx=8.8mm σy=16.5mm σz=5.3mm
+  bbox: {size: {x: 0.462, y: 0.529, z: 0.180}}
+  id: black bag#2
+```
 
 ## Project structure
 
@@ -184,12 +215,13 @@ src/roboworld_perception/         ROS 2 package (ament_python)
   roboworld_perception/
     sam3_detector.py              SAM 3 wrapper, prompt aliases
     pipeline.py                   hybrid detect/track orchestration
-    tracker.py                    IoU tracker, pose stabilization
+    tracker.py                    IoU association, track lifecycle, rotation stabilization
+    fusion.py                     per-track Kalman filter + χ² observation gating
     geometry.py                   back-projection, OBB, axis matching
     overlay.py                    debug rendering
     perception_node.py            ROS 2 node
   rviz/perception.rviz            RViz preset
-  test/                           unit tests (pytest, 14 cases)
+  test/                           pytest, 40 cases incl. filter property tests
 scripts/run_offline.py            bag → mp4/CSV without ROS
 run.sh                            single entry point
 ```
