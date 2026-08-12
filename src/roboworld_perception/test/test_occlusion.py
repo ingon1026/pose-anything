@@ -1,15 +1,12 @@
-import numpy as np
 from conftest import make_det as det
+from conftest import make_filtered_track
 
-from roboworld_perception.fusion import TrackFilter
 from roboworld_perception.tracker import IouTracker
 
 
 def give_filter(track, z=1.0):
     """트랙에 수렴된 융합 필터를 부여 (depth 판정·rescue 테스트용)."""
-    track.filter = TrackFilter(np.array([0.0, 0.0, z]),
-                               np.log([0.2, 0.1, 0.05]))
-    track.filter.P[:, 0, 0] = 1e-6  # 수렴 상태
+    track.filter = make_filtered_track(z=z).filter
     return track
 
 

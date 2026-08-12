@@ -171,7 +171,7 @@ class PerceptionNode(Node):
             # 융합 필터의 위치 불확실성을 표준 covariance 필드로 전달 —
             # 로봇 측 파지 게이팅(방안2)이 이 값을 소비한다. 회전은 필터
             # 밖(미추정)이라 0 유지.
-            var = (obj.filter.pos_std ** 2).tolist()
+            var = obj.filter.pos_var.tolist()
             hyp.pose.covariance[0] = var[0]
             hyp.pose.covariance[7] = var[1]
             hyp.pose.covariance[14] = var[2]

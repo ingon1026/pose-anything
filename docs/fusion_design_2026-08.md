@@ -23,10 +23,10 @@
 | 게이트 | 위치 3-dof / extent 3-dof 분리 χ²(0.999)=16.27, 블록별 부분 수락 | B |
 | 탈출 기전 | **정상 Q만.** Q_coast(A)·T² 편향검정(B)·NIS 팽창(C) 전부 기각 — 셋 다 F1/F2 방어를 깨거나 순환 논리 | 비판자 종합 |
 | score | R 배율 아님 — 존재확률 P_D로만 (실측: score는 기하 잡음을 예측 못 함) | C |
-| R | 물리 모델(σ_u, k_z·z²) + σ_sync = v̂·Δt_sync + flow 프레임 팽창 δ_flow. per-track R̂ 온라인 적응은 v1 OFF | A+B, σ_sync는 비판자 신규 |
+| R | 물리 하한 + σ_sync = v̂·Δt_sync + flow 팽창 δ_flow + 이동항 (v̂·dt)². **per-track R̂ 적응은 v1 ON** (비판자 판정 OFF를 데이터로 뒤집음 — C1 실측: 물체별 잡음 20×+ 편차라 고정 하한만으론 검은 가방이 만성 기각. 안전장치: 하한=물리 모델·상한 2500×·수락 관측만 갱신, 상한에서도 침입 기각을 property test로 고정) | A+B+실측 수정 |
 | 발행 | 단일 P + 신선도 타이머: CONFIRMED ∧ 최근 수락 ≤ T_stale ∧ σ ≤ τ. 로봇에는 pose.covariance로 P 그대로 | 비판자 신규 합성 |
 | 생명주기 | 신생 M-of-N(3) 승격(F4 방어), rescue는 CONFIRMED 유지 + 타이머 미리셋(첫 수락 전 비발행), 위치 P만 팽창 | A+B |
-| 절단 마스크 | 화면 경계 접촉 축은 extent 미갱신, 중심은 보이는 모서리+상태 extent로 재구성 (편향을 편향으로) | C |
+| 절단 마스크 | v1: 마스크가 화면 경계에 닿으면 extent 전체 미갱신 + 중심 R 팽창(편향을 불확실성으로 흡수) + 시드 금지. C의 축별 판정·중심 재구성은 Phase 2 | C(축소 구현) |
 | 저점수 2차 매칭 | 무조건 flag_occluded(현행 버그) → 같은 융합 게이트 통과 시 정상 수락 | C 지적 |
 | association 층 | IoU greedy·ByteTrack 2-pass·buffered rescue·_depth_conflict 유지. `_z_ok` veto는 융합 게이트로 흡수(중복 술어 제거) | 제약 |
 

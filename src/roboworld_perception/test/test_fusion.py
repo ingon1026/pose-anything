@@ -4,9 +4,8 @@
 것은 그 값에 맞춘 튜닝이 아니라 구조적 성질(단조성·유한성)이다.
 """
 import numpy as np
-import pytest
 
-from roboworld_perception.fusion import CHI2_3DOF, TrackFilter
+from roboworld_perception.fusion import TrackFilter
 
 DT = 1 / 15  # 공칭 프레임 주기
 
@@ -34,7 +33,6 @@ def escape_frames(f, delta, axis=2, limit=3000):
 def test_rejection_grows_acceptance_region():
     """불변식 1: 거부(미수락)가 이어지는 동안 수락 영역은 단조 증가."""
     f = make()
-    prev = np.inf
     widths = []
     for _ in range(50):
         f.predict(DT)

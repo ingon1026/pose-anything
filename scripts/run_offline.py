@@ -151,7 +151,7 @@ def main():
     writer = None
     rows = []
     csv_path = out_dir / f"{tag}.csv"
-    raw_f = raw_cw = None
+    raw_f = None
     if args.raw:
         from roboworld_perception.geometry import (compute_obb, match_axes,
                                                    mask_depth_to_points,
@@ -177,14 +177,18 @@ def main():
                 for o in objects:
                     if o.occluded or o.mask is None:
                         continue  # 정상 관측만 — 잡음 보정에 오염 프레임 배제
-                    robb = compute_obb(mask_depth_to_points(o.mask, depth, K))
+                    # depth_scale은 반드시 파이프라인과 동일하게 — 이 CSV가
+                    # 필터 상수(SIGMA_A·R 하한) 보정의 근거 데이터다
+                    robb = compute_obb(mask_depth_to_points(
+                        o.mask, depth, K, depth_scale=pipeline.depth_scale))
                     if robb is None:
                         continue
                     prev = raw_prev_R.get(o.track_id)
                     R_m, ext_m = (match_axes(robb.R, robb.extent, prev)
                                   if prev is not None else (robb.R, robb.extent))
                     raw_prev_R[o.track_id] = R_m
-                    z_med = masked_depth_median(o.mask, depth, box=o.box)
+                    z_med = masked_depth_median(o.mask, depth,
+                                                pipeline.depth_scale, o.box)
                     raw_cw.writerow(
                         [f"{stamp:.6f}", o.track_id, o.label,
                          int(pipeline.last_was_keyframe), f"{o.score:.3f}",

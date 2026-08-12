@@ -67,7 +67,7 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
 def masked_depth_median(mask, depth, depth_scale=0.001, box=None,
                         z_range=(0.10, 3.0)):
     """마스크 영역 depth 중앙값(m). "물체 깊이"의 단일 정의 —
-    가리개 침입 판정과 depth 기준선(EMA)이 모두 이것을 쓴다.
+    가리개 침입 판정(tracker.depth_intrusion)과 매칭 비용이 모두 이것을 쓴다.
 
     box(xyxy)가 있으면 그 ROI만 스캔한다. 유효 픽셀이 부족하면 None.
     """

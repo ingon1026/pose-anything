@@ -34,7 +34,7 @@ def _expand(box, k):
     return (cx - hw, cy - hh, cx + hw, cy + hh)
 
 
-def depth_intrusion(track, z, extra_var=0.0):
+def depth_intrusion(track, z):
     """관측 depth가 트랙 추정 깊이보다 유의하게 '가까우면' True — 가리개.
 
     가리개 침입의 단일 술어 (association 매칭 제외·rescue 거부·flow 전파
@@ -46,8 +46,7 @@ def depth_intrusion(track, z, extra_var=0.0):
     if z is None or track.filter is None:
         return False
     zt = float(track.filter.center[2])
-    sigma = float(np.sqrt(track.filter.P[2, 0, 0] + track.filter.rhat_pos[2]
-                          + extra_var))
+    sigma = track.filter.innovation_std(2)
     return zt > 0 and z < zt - 3.29 * sigma and z < 0.9 * zt
 
 
@@ -107,15 +106,13 @@ class Track:
         self.frozen = False
 
     def reactivate(self, det):
-        """가림 후 재등장 복귀(rescue). 가림 중 물체가 이동·교체됐을 수 있어
-        위치 불확실성을 rescue 탐색 반경 수준으로 키운다 (OC-SORT의 재등장
-        상태 복구와 같은 취지). 신선도는 리셋하지 않음 — 첫 수락 관측이
+        """가림 후 재등장 복귀(rescue). 위치 불확실성을 rescue 탐색 반경
+        수준으로 재팽창한다. 신선도는 리셋하지 않음 — 첫 수락 관측이
         들어올 때까지 발행되지 않는다."""
         self.observe(det)
         if self.filter is not None:
-            r = 0.75 * float(self.filter.extent_sorted[0])
-            self.filter.P[:, 0, 0] += r * r
-            self.filter.P[:, 1, 1] += 0.05 ** 2
+            self.filter.inflate_for_rescue(
+                0.75 * float(self.filter.extent_sorted[0]))
 
     def update_obb(self, obb: ObbResult | None, rot_alpha=0.15,
                    rot_deadband_deg=2.0, allow_rot=True):
@@ -132,7 +129,7 @@ class Track:
             # 상위 두 축이 거의 같은 물체(정사각형에 가까움)는 축 정체성이
             # 관측 불가능 — 프레임마다 축이 뒤바뀌며 flip으로 집계된다
             # (C1 실측: e1/e2≈1.03인 검은 가방만 축 교환 17~22%). 회전 동결.
-            allow_rot = self.obb is None
+            allow_rot = False
         if self.obb is None:
             R_new, ext = obb.R, obb.extent
             order = np.argsort(-np.asarray(ext))

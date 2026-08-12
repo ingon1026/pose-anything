@@ -1,9 +1,8 @@
 import numpy as np
+from conftest import make_filtered_track
 from scipy.spatial.transform import Rotation
 
-from roboworld_perception.fusion import TrackFilter
 from roboworld_perception.geometry import ObbResult
-from roboworld_perception.tracker import Track
 
 
 def obb_with_yaw(deg):
@@ -13,9 +12,7 @@ def obb_with_yaw(deg):
 
 
 def make_track():
-    t = Track(1, "obj", np.zeros(4), 0.9)
-    t.filter = TrackFilter(np.zeros(3), np.log([0.2, 0.1, 0.05]))
-    return t
+    return make_filtered_track(z=0.0, converged=False)
 
 
 def yaw_of(track):

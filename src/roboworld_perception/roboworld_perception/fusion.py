@@ -33,6 +33,10 @@ R_LOGE_FLOOR = 0.05
 # 554mm 침입은 pooled d²≈31 > χ²로 기각된다 (property test로 고정).
 RHAT_CAP = 2500.0    # 분산 배율 (σ로는 50×)
 RHAT_ALPHA = 0.05    # R̂ EMA 이득
+# 프레임별 가산 측정잡음(r_extra)의 재료 — R 모델 상수는 전부 이 모듈에 둔다:
+SYNC_STD = 0.011     # s — color/depth 짝짓기 시차 p95 (test2/4/5 실측 11ms)
+FLOW_STEP_STD = 0.002  # m/프레임 — 키프레임 이후 LK 누적 드리프트 (test2 실측)
+V0_STD = 0.05        # m/s — 속도 초기·rescue 재팽창 불확실성
 
 
 class TrackFilter:
@@ -43,7 +47,7 @@ class TrackFilter:
         self.v = np.zeros(3)                          # (3,) m/s
         # 축별 2×2 공분산 [[Pcc,Pcv],[Pcv,Pvv]] — 초기 불확실성은 크게
         # (신뢰는 관측이 벌어온다: M-of-N 승격 전까지 발행 안 됨)
-        self.P = np.tile(np.diag([R_POS_FLOOR ** 2 * 25, 0.05 ** 2]), (3, 1, 1))
+        self.P = np.tile(np.diag([R_POS_FLOOR ** 2 * 25, V0_STD ** 2]), (3, 1, 1))
         self.le = np.asarray(log_extent, float).copy()  # (3,) log m, 내림차순
         self.Ple = np.full(3, R_LOGE_FLOOR ** 2 * 25)
         # per-track 측정잡음 적응(분산). 하한=물리 모델, 수락 관측만 갱신 —
@@ -78,8 +82,8 @@ class TrackFilter:
         K = self.P[:, 0, :] / S[:, None]              # (3,2) 축별 이득
         self.x += K[:, 0] * nu
         self.v += K[:, 1] * nu
-        IKH = np.eye(2)[None] - K[:, :, None] @ np.array([[[1.0, 0.0]]])
-        self.P = IKH @ self.P
+        # (I−KH)P — H=[1,0]이므로 P에서 K·(P의 위치 행)만 빼면 된다
+        self.P = self.P - K[:, :, None] * self.P[:, 0:1, :]
         # R̂ 갱신 — 불편형 E[ν²]=P⁻+R̂+r_extra 에서 R̂만 남긴 EMA, 하한/상한 클립
         # (r_extra 몫을 빼야 sync·flow 잡음이 R̂에 이중 계상되지 않는다)
         inno2 = nu * nu - P_prior - r_extra
@@ -115,11 +119,23 @@ class TrackFilter:
         return np.exp(self.le)
 
     @property
-    def pos_std(self):
-        """축별 위치 표준편차 (3,) m — 발행 판정·pose.covariance용."""
-        return np.sqrt(self.P[:, 0, 0])
+    def pos_var(self):
+        """축별 위치 분산 (3,) m² — pose.covariance 발행용."""
+        return self.P[:, 0, 0]
 
     @property
-    def ext_rel_std(self):
-        """축별 상대 크기 표준편차 (3,) — log 공간 std ≈ 상대 오차."""
-        return np.sqrt(self.Ple)
+    def pos_std(self):
+        """축별 위치 표준편차 (3,) m — 발행 판정용."""
+        return np.sqrt(self.pos_var)
+
+    def innovation_std(self, axis):
+        """해당 축의 혁신 표준편차 sqrt(P+R̂) — 게이트와 같은 척도.
+        depth 침입 판정 등 외부 술어가 상태 배열을 직접 인덱싱하지 않게
+        하는 유일한 접근 창구다."""
+        return float(np.sqrt(self.P[axis, 0, 0] + self.rhat_pos[axis]))
+
+    def inflate_for_rescue(self, radius):
+        """가림 후 재등장(rescue) 시 위치·속도 불확실성 재팽창 —
+        가림 중 물체가 이동·교체됐을 수 있다 (OC-SORT 재등장 복구 취지)."""
+        self.P[:, 0, 0] += radius * radius
+        self.P[:, 1, 1] += V0_STD ** 2
