@@ -1,6 +1,16 @@
+import numpy as np
 from conftest import make_det as det
 
+from roboworld_perception.fusion import TrackFilter
 from roboworld_perception.tracker import IouTracker
+
+
+def give_filter(track, z=1.0):
+    """트랙에 수렴된 융합 필터를 부여 (depth 판정·rescue 테스트용)."""
+    track.filter = TrackFilter(np.array([0.0, 0.0, z]),
+                               np.log([0.2, 0.1, 0.05]))
+    track.filter.P[:, 0, 0] = 1e-6  # 수렴 상태
+    return track
 
 
 def test_full_occlusion_keeps_id():
@@ -23,79 +33,50 @@ def test_track_dropped_after_hold_exceeded():
     assert len(tr.tracks) == 0
 
 
-def test_partial_occlusion_flags_low_score():
-    tr = IouTracker()
-    for _ in range(5):  # 정상 score 기준선 형성 (ema ~0.9)
-        t = tr.update([det(score=0.9)])[0][0]
-    assert not t.occluded
-    t = tr.update([det(score=0.3)])[0][0]  # 평균의 50% 미만 (test4 실측 패턴)
-    assert t.occluded
-    t = tr.update([det(score=0.88)])[0][0]  # 가림 해제
-    assert not t.occluded
-
-
-def test_normal_fluctuation_not_flagged():
-    tr = IouTracker()
-    for s in [0.75, 0.70, 0.78, 0.61, 0.73]:  # test3 실측 수준의 정상 요동
-        t = tr.update([det(score=s)])[0][0]
-        assert not t.occluded
-
-
-def test_validate_reject_does_not_commit():
-    """검증(depth 침입 등) 실패 시 관측이 트랙에 커밋되지 않는다."""
-    tr = IouTracker()
-    t0 = tr.update([det(box=(100, 100, 200, 180), score=0.9)])[0][0]
-    box_before = t0.box.copy()
-    ema_before = t0.score_ema
-    pairs = tr.update([det(box=(105, 100, 205, 180), score=0.9)],
-                      validate=lambda t, d: False)
-    t = pairs[0][0]
-    assert t.occluded                       # 가림 처리
-    assert (t.box == box_before).all()      # box 미오염
-    assert t.score_ema == ema_before        # 기준선 미오염
-    # 다음 프레임 검증 통과 → 정상 복귀 (depth 플래그 해제 경로)
-    t = tr.update([det(box=(100, 100, 200, 180), score=0.9)])[0][0]
-    assert not t.occluded
-
-
-def test_rescue_rejected_when_validate_fails():
-    """동결 트랙 rescue도 검증을 통과해야 한다 (가리개 오인 복귀 방지)."""
+def test_rescue_rejected_on_depth_conflict():
+    """동결 트랙 rescue도 depth 침입 검출로는 안 된다 (가리개 오인 복귀 방지)."""
     tr = IouTracker(max_missed=2, occlusion_hold=10)
     tid = tr.update([det()])[0][0].track_id
+    give_filter(tr.tracks[0], z=1.0)
     for _ in range(4):
         tr.update([])
     assert tr.tracks[0].occluded
-    pairs = tr.update([det(box=(250, 100, 330, 180))],  # rescue 버퍼 범위 내
-                      validate=lambda t, d: False)
-    assert pairs == []                      # 복귀 거부, 새 트랙도 없음
+    occ = det(box=(250, 100, 330, 180))  # rescue 버퍼 범위 내
+    occ["z"] = 0.5                       # 추정 깊이의 50% — 침입
+    assert tr.update([occ]) == []        # 복귀 거부, 새 트랙도 없음
     assert tr.tracks[0].occluded
-    pairs = tr.update([det(box=(250, 100, 330, 180))])  # 검증 통과 시 복귀
-    assert pairs[0][0].track_id == tid
+    real = det(box=(250, 100, 330, 180))
+    real["z"] = 0.98
+    assert tr.update([real])[0][0].track_id == tid  # 정상 depth면 복귀
 
 
-def test_reactivate_resets_depth_baseline():
-    """rescue 복귀(다른 위치 재등장) 시 낡은 depth 기준선은 버린다 —
-    가림 중 물체가 들리거나 교체됐을 수 있어서. 같은 자리 재등장(IoU
-    매칭)은 observe 경로라 기준선을 유지한다."""
+def test_reactivate_inflates_uncertainty():
+    """rescue 복귀(다른 위치 재등장) 시 위치 불확실성을 키운다 — 가림 중
+    물체가 이동·교체됐을 수 있어서. 첫 수락 관측 전까지는 발행 불가."""
     tr = IouTracker(max_missed=2, occlusion_hold=10)
     t = tr.update([det()])[0][0]
-    t.depth_ema = 0.9
+    give_filter(t)
+    std_before = t.filter.pos_std.max()
     for _ in range(4):
         tr.update([])
     t = tr.update([det(box=(250, 100, 330, 180))])[0][0]  # 다른 위치 → rescue
-    assert t.depth_ema == 0.0
+    assert t.filter.pos_std.max() > 10 * std_before
+    assert not t.publishable  # 신선도 미리셋 — 수락 관측이 다시 벌어와야 함
 
 
 def test_low_score_second_pass_keeps_track_alive():
-    """저점수 검출(ByteTrack 2차 매칭)은 트랙 생존 신호 — 커밋 없이 유지."""
+    """저점수 검출(ByteTrack 2차 매칭)은 트랙 생존·위치 신호 — pose 오염은
+    필터 게이트 소관이라 여기서 box 갱신을 막지 않는다."""
     tr = IouTracker(max_missed=2, occlusion_hold=5)
-    tr.update([det(score=0.9)], high_score=0.4)
+    tr.update([det(score=0.9, box=(100, 100, 200, 180))], high_score=0.4)
     for _ in range(4):  # max_missed를 넘는 횟수 동안 저점수만 존재
-        pairs = tr.update([det(score=0.2)], high_score=0.4)
+        pairs = tr.update([det(score=0.2, box=(105, 100, 205, 180))],
+                          high_score=0.4)
         t = pairs[0][0]
-        assert t.occluded and t.missed == 0  # 동결로 안 넘어감
+        assert t.missed == 0 and not t.frozen  # 동결로 안 넘어감
+    assert t.box[0] == 105  # 저점수 매칭도 위치는 따라간다
     t = tr.update([det(score=0.9)], high_score=0.4)[0][0]
-    assert not t.occluded and len(tr.tracks) == 1
+    assert len(tr.tracks) == 1
 
 
 def test_low_score_never_creates_track():
@@ -108,9 +89,9 @@ def test_depth_conflict_does_not_steal_match():
     """얕은 depth(가리개) 검출은 매칭 후보에서 제외 — 진짜 검출이 매칭됨."""
     tr = IouTracker()
     t = tr.update([det()], high_score=0.4)[0][0]
-    t.depth_ema = 1.0
+    give_filter(t, z=1.0)
     occluder = det(box=(100, 100, 200, 180), score=0.95)
-    occluder["z"] = 0.5   # 기준선의 50% — 침입
+    occluder["z"] = 0.5   # 추정 깊이의 50% — 침입
     real = det(box=(102, 100, 202, 180), score=0.85)
     real["z"] = 0.98
     pairs = tr.update([occluder, real], high_score=0.4)

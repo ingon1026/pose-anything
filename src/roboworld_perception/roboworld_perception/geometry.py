@@ -64,23 +64,6 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
     return np.column_stack([x, y, z])
 
 
-# 가리개 침입 판정 비율 — 마스크 depth가 기준선의 이 비율보다 가까우면 가림
-# (test4 실측: 정상 0.92m, 침입 시 0.55m). 매칭 비용·검증이 공유하는 단일 정의.
-INTRUSION_RATIO = 0.8
-
-# 크기 급변 판정 — 관측 OBB 크기가 트랙 크기에서 "비율 30% 이상 그리고
-# 절대 3cm 이상" 튀면 오염(가리개와 합쳐진 blob). score·depth가 못 잡는
-# "닮은 가리개가 같은 높이에 겹친" 케이스용 제3 신호.
-# 절대량 조건이 없으면 얇은 축(책 높이 2cm)의 mm급 depth 노이즈가
-# 비율로는 30%를 넘어 오탐이 폭발한다 (실측: 책 관측 356→70프레임).
-SIZE_JUMP_RATIO = 0.3
-SIZE_JUMP_ABS = 0.03  # m
-# 크기 거부가 이 횟수(키프레임) 연속되면 오염이 아니라 실제 변화로 보고
-# 새 관측을 기준선으로 재적응한다. 탈출구 없는 거부 게이트는 낡은 기준선에
-# 영원히 잠기는 교착을 만든다 (라이브 실측: 비가림 물체 3개가 OCCLUDED 고착).
-SIZE_REJECT_LIMIT = 3
-
-
 def masked_depth_median(mask, depth, depth_scale=0.001, box=None,
                         z_range=(0.10, 3.0)):
     """마스크 영역 depth 중앙값(m). "물체 깊이"의 단일 정의 —

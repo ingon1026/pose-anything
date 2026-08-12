@@ -131,7 +131,10 @@ class PerceptionNode(Node):
             else:
                 rgb, bgr = cv2.cvtColor(img, cv2.COLOR_BGR2RGB), img.copy()
             depth = img_to_np(depth_msg)
-            objects = self.pipeline.process(rgb, depth, self.K, self.prompts)
+            stamp_s = color_msg.header.stamp.sec + \
+                color_msg.header.stamp.nanosec * 1e-9
+            objects = self.pipeline.process(rgb, depth, self.K, self.prompts,
+                                            stamp_s)
             proc_ms = (time.perf_counter() - t0) * 1000
             self.publish(objects, color_msg.header.stamp, bgr, proc_ms)
         except Exception as e:  # keep the node alive on a bad frame
@@ -165,6 +168,13 @@ class PerceptionNode(Node):
             hyp.pose.pose.orientation.y = qy
             hyp.pose.pose.orientation.z = qz
             hyp.pose.pose.orientation.w = qw
+            # 융합 필터의 위치 불확실성을 표준 covariance 필드로 전달 —
+            # 로봇 측 파지 게이팅(방안2)이 이 값을 소비한다. 회전은 필터
+            # 밖(미추정)이라 0 유지.
+            var = (obj.filter.pos_std ** 2).tolist()
+            hyp.pose.covariance[0] = var[0]
+            hyp.pose.covariance[7] = var[1]
+            hyp.pose.covariance[14] = var[2]
             det.results.append(hyp)
             det.bbox.center = hyp.pose.pose
             det.bbox.size.x, det.bbox.size.y, det.bbox.size.z = o.extent

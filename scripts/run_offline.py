@@ -68,7 +68,7 @@ def read_bag(bag_path, max_frames=None):
             if cmsg.encoding == "bgr8":
                 rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
             count += 1
-            return ct * 1e-9, rgb, dimg, K
+            return ct * 1e-9, rgb, dimg, K, (dt - ct) * 1e-6
 
         for conn, t, raw in reader.messages(connections=conns):
             if conn.topic == INFO:
@@ -127,6 +127,9 @@ def main():
                     help="SAM3 입력 해상도 (0=기본 1008)")
     ap.add_argument("--detect-interval", type=int, default=5,
                     help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
+    ap.add_argument("--raw", action="store_true",
+                    help="평활 전 raw OBB를 {tag}_raw.csv로 추가 기록 "
+                         "(측정 잡음 보정용 — 발행 CSV는 EMA·slerp 통과 후 값)")
     args = ap.parse_args()
 
     from roboworld_perception.overlay import draw_objects, draw_status, show_window
@@ -148,15 +151,47 @@ def main():
     writer = None
     rows = []
     csv_path = out_dir / f"{tag}.csv"
+    raw_f = raw_cw = None
+    if args.raw:
+        from roboworld_perception.geometry import (compute_obb, match_axes,
+                                                   mask_depth_to_points,
+                                                   masked_depth_median)
+        raw_f = open(out_dir / f"{tag}_raw.csv", "w", newline="")
+        raw_cw = csv.writer(raw_f)
+        # re1..re3: 이전 프레임 raw 축에 match_axes로 대응시킨 extent —
+        # 축 교환(argsort 변경)·프레임간 잔차를 사후 분석할 수 있게 한다
+        raw_cw.writerow(["stamp", "track_id", "label", "keyframe", "score",
+                         "rx", "ry", "rz", "re1", "re2", "re3",
+                         "num_points", "z_med", "sync_ms"])
+        raw_prev_R = {}
     with open(csv_path, "w", newline="") as f:
         cw = csv.writer(f)
         cw.writerow(CSV_HEADER)
         t_start = time.perf_counter()
         n = 0
-        for stamp, rgb, depth, K in read_bag(args.bag, args.max_frames):
+        for stamp, rgb, depth, K, sync_ms in read_bag(args.bag, args.max_frames):
             t0 = time.perf_counter()
-            objects = pipeline.process(rgb, depth, K, prompts)
+            objects = pipeline.process(rgb, depth, K, prompts, stamp)
             proc_ms = (time.perf_counter() - t0) * 1000
+            if args.raw:
+                for o in objects:
+                    if o.occluded or o.mask is None:
+                        continue  # 정상 관측만 — 잡음 보정에 오염 프레임 배제
+                    robb = compute_obb(mask_depth_to_points(o.mask, depth, K))
+                    if robb is None:
+                        continue
+                    prev = raw_prev_R.get(o.track_id)
+                    R_m, ext_m = (match_axes(robb.R, robb.extent, prev)
+                                  if prev is not None else (robb.R, robb.extent))
+                    raw_prev_R[o.track_id] = R_m
+                    z_med = masked_depth_median(o.mask, depth, box=o.box)
+                    raw_cw.writerow(
+                        [f"{stamp:.6f}", o.track_id, o.label,
+                         int(pipeline.last_was_keyframe), f"{o.score:.3f}",
+                         *[f"{v:.5f}" for v in robb.center],
+                         *[f"{v:.5f}" for v in ext_m], robb.num_points,
+                         f"{z_med:.4f}" if z_med is not None else "",
+                         f"{sync_ms:.2f}"])
             bgr = draw_objects(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), objects, K)
             draw_status(bgr, status_text(1000 / max(proc_ms, 1e-3), pipeline, objects))
             if writer is None:
@@ -181,6 +216,8 @@ def main():
             if n % 20 == 0:
                 print(f"frame {n}: {len(objects)} objects, {proc_ms:.0f}ms")
         total = time.perf_counter() - t_start
+    if raw_f:
+        raw_f.close()
     if writer:
         writer.release()
     print(f"\n{n} frames in {total:.1f}s -> {n / max(total, 1e-9):.2f} FPS")

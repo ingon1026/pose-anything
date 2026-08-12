@@ -4,16 +4,23 @@
 사이 프레임은 광학흐름으로 마스크를 평행이동해 추적한다. 3D OBB는
 어느 쪽이든 그 프레임의 실제 depth로 매번 계산한다.
 
+관측 수락은 트랙별 융합 필터(fusion.TrackFilter)의 χ² 게이트가 판정한다 —
+이전의 이진 게이트(score·depth·size)와 달리 거부가 이어지면 불확실성이
+자라 게이트가 스스로 열리므로 교착이 없다 (docs/fusion_design_2026-08.md).
+
 offline 스크립트와 ROS 노드가 공유하는 헬퍼(이미지 디코드, CSV 스키마)도
 여기에 둔다 — 두 진입점이 따로 복사해 들고 있으면 조용히 어긋난다.
 """
 import cv2
 import numpy as np
 
-from .geometry import (INTRUSION_RATIO, SIZE_JUMP_ABS, SIZE_JUMP_RATIO,
-                       SIZE_REJECT_LIMIT, compute_obb, mask_depth_to_points,
-                       masked_depth_median)
-from .tracker import IouTracker
+from .fusion import TrackFilter
+from .geometry import compute_obb, mask_depth_to_points, masked_depth_median
+from .tracker import IouTracker, depth_intrusion
+
+# 프레임별 가산 측정잡음 std (m 단위 환산용, calib 실측 근거):
+SYNC_STD = 0.011   # s — color/depth 짝짓기 시차 p95 (test2/4/5 실측 11ms)
+FLOW_STEP_STD = 0.002  # m/프레임 — 키프레임 이후 LK 누적 드리프트 (test2 실측)
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
 
@@ -84,13 +91,18 @@ def _shift_mask(mask, dx, dy):
     return cv2.warpAffine(mask.astype(np.uint8), M, (w, h)) > 0
 
 
+def _touches_border(mask):
+    """마스크가 화면 경계에 닿아 있는가 — 절단 관측(물체 일부만 보임) 판정."""
+    return bool(mask[0].any() or mask[-1].any()
+                or mask[:, 0].any() or mask[:, -1].any())
+
+
 class PerceptionPipeline:
-    def __init__(self, detector, depth_scale=0.001, ema=0.4, rot_alpha=0.15,
+    def __init__(self, detector, depth_scale=0.001, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1):
         self.detector = detector
         self.depth_scale = depth_scale
-        self.ema = ema
         self.rot_alpha = rot_alpha
         # "라벨당 트랙 수" 제한은 트래커의 새 트랙 생성에서만 건다
         # (검출 단계에서 자르면 score 역전 시 ID가 끊김)
@@ -99,68 +111,79 @@ class PerceptionPipeline:
         self.detect_interval = max(1, detect_interval)
         self._frame_idx = 0
         self._prev_gray = None
+        self._last_stamp = None
+        self._last_dt = 1 / 15
         self.last_was_keyframe = False  # 상태 표시용
 
     def reset(self):
         self.tracker.reset()
         self._frame_idx = 0
         self._prev_gray = None
+        self._last_stamp = None
+        self._last_dt = 1 / 15
 
-    def process(self, rgb, depth, K, prompts):
-        """반환: 관측된 Track + 표시용 가림(occluded) Track 목록.
+    def process(self, rgb, depth, K, prompts, stamp_s=None):
+        """반환: 이 프레임의 트랙 목록(가림 트랙 포함 — 표시용).
+
+        stamp_s: 프레임 시각(초). 실제 스탬프를 쓰는 이유는 프레임 드롭
+        (_busy)·bag 재생 속도와 무관하게 필터 dt와 신선도(T_STALE)가
+        물리 시간을 따르게 하기 위해서다. 미지정 시 공칭 15fps로 합성.
 
         pose를 소비(발행·기록)할지는 Track.publishable로 판정할 것 —
         가림 트랙의 obb는 마지막 정상값(stale)이다.
         """
+        if stamp_s is None:
+            stamp_s = (self._last_stamp or 0.0) + 1 / 15
+        dt = (stamp_s - self._last_stamp) if self._last_stamp is not None else 1 / 15
+        self._last_stamp = stamp_s
+        self._last_dt = float(np.clip(dt, 1e-3, 0.5))
+        # 관측 유무와 무관하게 모든 트랙의 시간을 전진 — 거부·미관측
+        # 프레임에도 P가 자라는 것이 교착 불가능성의 근거다
+        for t in self.tracker.tracks:
+            t.now = stamp_s
+            if t.filter is not None:
+                t.filter.predict(dt)
+
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         keyframe = (self._frame_idx % self.detect_interval == 0
                     or self._prev_gray is None)
         self.last_was_keyframe = keyframe
         self._frame_idx += 1
 
-        out = (self._detect_frame(rgb, depth, K, prompts) if keyframe
+        out = (self._detect_frame(rgb, depth, K, prompts, stamp_s) if keyframe
                else self._track_frame(gray, depth, K))
         self._prev_gray = gray
         return out
 
-    def _z_ok(self, track, z):
-        """가리개 침입 검사 — 마스크 depth가 기준선의 INTRUSION_RATIO보다
-        가까우면 거부. score와 달리 외형이 닮은 가리개도 못 속인다."""
-        return (track.depth_ema == 0 or z is None
-                or z >= INTRUSION_RATIO * track.depth_ema)
-
-    def _depth_ok(self, track, mask, depth, box=None):
-        if track.depth_ema == 0:
-            return True  # 기준선 미형성 — depth 계산 자체를 생략
-        return self._z_ok(track, masked_depth_median(mask, depth,
-                                                     self.depth_scale, box))
-
-    def _detect_frame(self, rgb, depth, K, prompts):
+    def _detect_frame(self, rgb, depth, K, prompts, stamp_s):
         detections = self.detector.detect(rgb, prompts)
-        for d in detections:  # 매칭 비용·검증이 공유할 depth를 1회만 계산
+        for d in detections:  # 매칭 비용(depth 충돌 배제)이 쓸 depth를 1회만 계산
             d["z"] = masked_depth_median(d["mask"], depth, self.depth_scale,
                                          d["box"])
         pairs = self.tracker.update(
-            detections, validate=lambda t, d: self._z_ok(t, d["z"]),
-            high_score=getattr(self.detector, "threshold", None))
+            detections, high_score=getattr(self.detector, "threshold", None))
+        for t in self.tracker.tracks:  # update가 만든 새 트랙에도 시각 주입
+            t.now = stamp_s
         out = []
         for track, det in pairs:
-            if not track.occluded:  # 검증 통과한 관측만 mask·pose 커밋
-                track.mask = det["mask"]
-                self._update_geometry(track, depth, K)
+            track.mask = det["mask"]
+            self._update_geometry(track, depth, K)
             out.append(track)
         return self._with_frozen(out)
 
     def _track_frame(self, gray, depth, K):
         out = []
         for track in self.tracker.tracks:
-            if track.occluded or track.mask is None or track.missed > 0:
+            # 동결(연속 미검출) 전에는 missed와 무관하게 계속 전파한다 —
+            # 이전의 missed>0 중단은 "짧은 미검출 구간 사망" 데드존을 만들었다
+            if track.frozen or track.mask is None:
                 continue
-            # 흐름 계산 전에 현재 위치에서 침입부터 확인 — 가리개가 도착한
-            # 프레임의 LK·역투영 비용을 건너뛰고, 흐름이 가리개를 따라가는
-            # 것도 원천 차단
-            if not self._depth_ok(track, track.mask, depth, track.box):
-                track.flag_occluded()
+            # 현재 마스크 위치의 depth가 가리개 침입이면 전파·융합 모두 보류
+            # — LK가 가리개(닮은 표면)를 따라가며 마스크·박스가 물체를
+            # 떠나는 것을 차단한다 (라이브 실측: 서류 파일에 마스크가 붙어
+            # 따라감). 보류 중에도 predict가 P를 키우므로 유한 시간 뒤 해제.
+            if depth_intrusion(track, masked_depth_median(
+                    track.mask, depth, self.depth_scale, track.box)):
                 continue
             flow = propagate_mask(self._prev_gray, gray, track.mask, track.box)
             if flow is not None:
@@ -178,28 +201,50 @@ class PerceptionPipeline:
                       if t.occluded and t.track_id not in seen]
 
     def _update_geometry(self, track, depth, K):
+        """관측 → 필터 융합. 게이트 거부 시 상태·표시 OBB 어느 것도 안 바뀌고,
+        관측 자체가 없으면(depth 소실 등) 신선도 타이머만 흘러 T_STALE 뒤
+        발행이 멈춘다 — stale pose가 로봇에 도달하는 경로가 없다."""
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
         obb = compute_obb(points)
-        # 제3 신호 — 크기 일관성: 물체 크기는 프레임 사이에 급변하지 않는다.
-        # 닮은 가리개가 같은 높이로 겹치면(score·depth 무력) 관측 blob의
-        # 크기가 튀는 것으로 오염을 잡는다.
-        if obb is not None and track.obb is not None:
-            new_e = np.sort(obb.extent)[::-1]
-            old_e = np.sort(track.obb.extent)[::-1]
-            diff = np.abs(new_e - old_e)
-            jump = (diff / (old_e + 1e-9) > SIZE_JUMP_RATIO) & (diff > SIZE_JUMP_ABS)
-            if jump.any() and track.size_rejects < SIZE_REJECT_LIMIT:
-                track.size_rejects += 1
-                track.flag_occluded()
-                return  # 오염 관측 — pose·기준선 어느 것도 갱신 안 함
-            if jump.any():
-                # 연속 거부 한도 초과 = 일시적 blob이 아니라 실제 변화 —
-                # 새 관측을 기준선으로 재적응 (교착 방지). EMA 대신 즉시 교체.
-                track.obb = obb
-        track.size_rejects = 0
-        z = masked_depth_median(track.mask, depth, self.depth_scale, track.box)
-        if z is not None:  # 정상 관측만 여기 도달 — 기준선 갱신
-            track.depth_ema = z if track.depth_ema == 0 else \
-                0.9 * track.depth_ema + 0.1 * z
-        track.update_obb(obb, self.ema, self.rot_alpha)
+        if obb is None:
+            return
+        border = _touches_border(track.mask)
+        log_ext = np.log(np.sort(obb.extent)[::-1] + 1e-9)
+        if track.filter is None:
+            if border:
+                return  # 절단 관측으로 필터를 시드하지 않음 (화면 진입 중)
+            track.filter = TrackFilter(obb.center, log_ext)
+            track.n_accepted = 1
+            track.last_accept_t = track.now
+            track.update_obb(obb, self.rot_alpha)
+            return
+        f = track.filter
+        speed = float(np.linalg.norm(f.v))
+        steps = (self._frame_idx - 1) % self.detect_interval  # 키프레임 후 경과
+        # 이동 물체의 마스크는 프레임 주기 안 어디 시점의 위치인지 불확실 —
+        # v·dt 항이 없으면 빠른 구간(test3 실측 137mm/s)에서 정직한 관측이
+        # 게이트 폭(~2mm)을 넘어 기각된다. 정지 물체에서는 0이라 무해.
+        r_extra = ((speed * self._last_dt) ** 2 + (speed * SYNC_STD) ** 2
+                   + (FLOW_STEP_STD * steps) ** 2)
+        if border:
+            # 절단 마스크의 중심은 보이는 쪽으로 편향 — 편향을 불확실성으로
+            # 흡수하고 extent는 갱신하지 않는다 (화면 진입/이탈 대응)
+            r_extra += (float(f.extent_sorted[0]) / 4) ** 2
+        ok_ext = f.fuse_extent(log_ext) if not border else False
+        if f.fuse_pos(obb.center, r_extra):
+            if self.last_was_keyframe:
+                # 승격 카운트는 SAM 재검출(키프레임)만 — flow 프레임은 같은
+                # 마스크의 전파라 독립 증거가 아니다 (자기 확인 승격 방지)
+                track.n_accepted += 1
+            track.last_accept_t = track.now
+            track.update_obb(obb, self.rot_alpha, allow_rot=ok_ext)
+        elif self.last_was_keyframe and not track.confirmed and not border:
+            # 미승격 트랙의 기각 관측(키프레임)은 거부 대신 재시드 — 오염
+            # blob으로 시드된 필터에 정직한 관측이 수십 초 잠기는 것을 방지.
+            # 승격에는 결과적으로 "연속 일관 관측 3회"가 필요해진다 (F4 강화).
+            track.filter = TrackFilter(obb.center, log_ext)
+            track.n_accepted = 1
+            track.last_accept_t = track.now
+            track.obb = None  # 이전 시드의 표시도 폐기 — update_obb가 재구성
+            track.update_obb(obb, self.rot_alpha)

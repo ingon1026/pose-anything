@@ -1,9 +1,20 @@
-"""Greedy 2D-box IoU tracker with EMA smoothing and OBB axis continuity."""
+"""Greedy 2D-box IoU tracker with fusion-filter state and OBB axis continuity.
+
+관측 품질 판정(score·depth·size 게이트)은 전부 fusion.TrackFilter의
+χ² 게이트로 대체됐다 — 이 파일은 association(2D 매칭·생명주기)과
+회전 연속성만 담당한다 (docs/fusion_design_2026-08.md).
+"""
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from .geometry import INTRUSION_RATIO, ObbResult, match_axes, smooth_rotation
+from .fusion import TrackFilter
+from .geometry import ObbResult, match_axes, smooth_rotation
+
+# ── 생명주기 상수 (근거: docs/fusion_design_2026-08.md §4) ──
+T_STALE = 0.5      # s — 그리퍼에 도달할 수 있는 stale pose 최대 나이 (안전 속성)
+CONFIRM_N = 3      # 신생 트랙 발행 승격에 필요한 수락 관측 수 (F4 반쪽 재탄생 방어)
+PUB_POS_STD_MAX = 0.02  # m — 발행 허용 위치 불확실성 상한 (로봇 사양 확정 전 잠정)
 
 
 def box_iou(a, b):
@@ -23,13 +34,27 @@ def _expand(box, k):
     return (cx - hw, cy - hh, cx + hw, cy + hh)
 
 
+def depth_intrusion(track, z, extra_var=0.0):
+    """관측 depth가 트랙 추정 깊이보다 유의하게 '가까우면' True — 가리개.
+
+    가리개 침입의 단일 술어 (association 매칭 제외·rescue 거부·flow 전파
+    보류가 전부 이것을 쓴다). 기준선은 필터의 z 추정 + 불확실성:
+    통계 유의(χ²(0.999,1)의 한쪽 꼬리 3.29σ) AND 물리 유의(10% 이상 근접)
+    둘 다 만족해야 침입 — 잡음 큰 물체(검은 가방)의 정상 요동을 가리개로
+    오인하지 않는다. 거부·미관측 중 P가 자라 σ가 넓어지므로 실제 depth
+    변화(물체가 들림 등)는 유한 시간 안에 침입 판정을 벗어난다 (교착 없음)."""
+    if z is None or track.filter is None:
+        return False
+    zt = float(track.filter.center[2])
+    sigma = float(np.sqrt(track.filter.P[2, 0, 0] + track.filter.rhat_pos[2]
+                          + extra_var))
+    return zt > 0 and z < zt - 3.29 * sigma and z < 0.9 * zt
+
+
 def _depth_conflict(track, det):
-    """검출의 depth가 트랙 기준선보다 침입 비율 이상 가까우면 True —
-    가리개일 가능성이 높아 매칭 후보에서 제외한다 (PD-SORT의 depth 비용을
-    실제 RGB-D로 구현). det["z"]는 pipeline이 채운다; 없으면 판단 안 함."""
-    z = det.get("z")
-    return (track.depth_ema > 0 and z is not None
-            and z < INTRUSION_RATIO * track.depth_ema)
+    """검출이 가리개로 보이면 매칭 후보에서 제외 (PD-SORT의 depth 비용을
+    실제 RGB-D로 구현). det["z"]는 pipeline이 채운다."""
+    return depth_intrusion(track, det.get("z"))
 
 
 @dataclass
@@ -43,53 +68,77 @@ class Track:
     flip_count: int = 0
     age: int = 0
     mask: np.ndarray | None = field(default=None, repr=False)  # 하이브리드 추적용
-    score_ema: float = 0.0   # 정상 score 기준선 (부분 가림 판별용)
-    depth_ema: float = 0.0   # 정상 depth 기준선(m) — 가리개 침입 판별용
-    occluded: bool = False   # 완전/부분 가림 상태 — pose 발행 중단
-    size_rejects: int = 0    # 크기 게이트 연속 거부 횟수 (교착 탈출용)
+    filter: TrackFilter | None = field(default=None, repr=False)  # 위치+크기 상태
+    frozen: bool = False       # 연속 미검출로 동결 (association 부기 — 게이트 아님)
+    n_accepted: int = 0        # 수락된 pose 관측 수 (M-of-N 승격용)
+    last_accept_t: float | None = None  # 마지막 수락 시각 (신선도)
+    now: float = 0.0           # 파이프라인이 매 프레임 주입하는 현재 시각
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 
-    def __post_init__(self):
-        if self.score_ema == 0:
-            self.score_ema = self.score  # 생성 score로 기준선 시드
+    @property
+    def fresh(self):
+        """pose 관측이 신선한가 — stale pose 발행 금지(T_STALE)의 근거."""
+        return (self.last_accept_t is not None
+                and self.now - self.last_accept_t <= T_STALE)
+
+    @property
+    def confirmed(self):
+        return self.n_accepted >= CONFIRM_N
+
+    @property
+    def occluded(self):
+        """표시용 파생 상태 — 동결됐거나, pose가 있는데 신선하지 않으면 가림."""
+        return self.frozen or (self.obb is not None and not self.fresh)
 
     @property
     def publishable(self):
         """소비자(토픽·CSV)가 이 트랙의 pose를 내보내도 되는가."""
-        return self.obb is not None and not self.occluded
+        return (self.obb is not None and self.filter is not None
+                and not self.frozen and self.confirmed and self.fresh
+                and float(self.filter.pos_std.max()) <= PUB_POS_STD_MAX)
 
-    # ── 가림 상태 전이는 아래 세 메서드로만 일어난다 ──────────────
+    # ── association이 호출하는 상태 전이 ──────────────────
     def observe(self, det):
-        """정상 매칭 관측 커밋. score 급락(부분 가림)이면 box·EMA는 보존."""
-        self.score = det["score"]
-        self.missed = 0
-        self.age += 1
-        self.occluded = self.score < 0.5 * self.score_ema
-        if not self.occluded:
-            self.box = np.asarray(det["box"], dtype=float)
-            self.score_ema = 0.9 * self.score_ema + 0.1 * self.score
-
-    def flag_occluded(self):
-        """가림 판정(depth 침입·완전 소실) — 관측은 있었어도 수락하지 않음."""
-        self.occluded = True
-
-    def reactivate(self, det):
-        """가림 후 재등장 복귀. depth 기준선은 리셋 — 가림 중 물체가
-        들리거나 교체됐을 수 있어 낡은 기준선이 오판을 만든다 (OC-SORT의
-        재등장 상태 복구와 같은 취지). 다음 정상 프레임에서 재시드된다."""
+        """매칭 관측 커밋(2D box·score). pose 수락은 필터 게이트가 별도 판정."""
         self.box = np.asarray(det["box"], dtype=float)
         self.score = det["score"]
         self.missed = 0
         self.age += 1
-        self.occluded = False
-        self.depth_ema = 0.0
+        self.frozen = False
 
-    def update_obb(self, obb: ObbResult | None, ema=0.4, rot_alpha=0.15,
-                   rot_deadband_deg=2.0):
-        if obb is None:
+    def reactivate(self, det):
+        """가림 후 재등장 복귀(rescue). 가림 중 물체가 이동·교체됐을 수 있어
+        위치 불확실성을 rescue 탐색 반경 수준으로 키운다 (OC-SORT의 재등장
+        상태 복구와 같은 취지). 신선도는 리셋하지 않음 — 첫 수락 관측이
+        들어올 때까지 발행되지 않는다."""
+        self.observe(det)
+        if self.filter is not None:
+            r = 0.75 * float(self.filter.extent_sorted[0])
+            self.filter.P[:, 0, 0] += r * r
+            self.filter.P[:, 1, 1] += 0.05 ** 2
+
+    def update_obb(self, obb: ObbResult | None, rot_alpha=0.15,
+                   rot_deadband_deg=2.0, allow_rot=True):
+        """수락된 raw 관측으로 표시·발행용 OBB 재구성.
+
+        center·extent는 필터 상태에서, 회전은 기존 검증 경로(match_axes +
+        데드밴드 + slerp) 그대로 — flips=0은 회귀 지표라 무수정.
+        allow_rot=False: extent 게이트가 기각한 관측(blob·절단)의 회전은
+        slerp에 넣지 않고 이전 방향을 유지한다 — 오염 회전 차단."""
+        if obb is None or self.filter is None:
             return
+        es = self.filter.extent_sorted
+        if es[0] / max(es[1], 1e-9) < 1.1:
+            # 상위 두 축이 거의 같은 물체(정사각형에 가까움)는 축 정체성이
+            # 관측 불가능 — 프레임마다 축이 뒤바뀌며 flip으로 집계된다
+            # (C1 실측: e1/e2≈1.03인 검은 가방만 축 교환 17~22%). 회전 동결.
+            allow_rot = self.obb is None
         if self.obb is None:
-            self.obb = obb
+            R_new, ext = obb.R, obb.extent
+            order = np.argsort(-np.asarray(ext))
+        elif not allow_rot:
+            R_new = self.obb.R
+            order = np.argsort(-self.obb.extent)
         else:
             R, ext = match_axes(obb.R, obb.extent, self.obb.R)
             # ponytail: flip metric = >45deg jump of first axis after matching
@@ -103,12 +152,12 @@ class Track:
                 R_new = self.obb.R
             else:
                 R_new = smooth_rotation(self.obb.R, R, rot_alpha)
-            self.obb = ObbResult(
-                center=ema * obb.center + (1 - ema) * self.obb.center,
-                extent=ema * ext + (1 - ema) * self.obb.extent,
-                R=R_new,
-                num_points=obb.num_points,
-            )
+            order = np.argsort(-np.asarray(ext))
+        # 필터의 정렬 extent를 축 크기 순위에 따라 R 열에 배치
+        ext_out = np.empty(3)
+        ext_out[order] = self.filter.extent_sorted
+        self.obb = ObbResult(center=self.filter.center.copy(), extent=ext_out,
+                             R=R_new, num_points=obb.num_points)
 
 
 class IouTracker:
@@ -152,15 +201,13 @@ class IouTracker:
             used_d.add(id(d))
             yield ti, d
 
-    def update(self, detections, validate=None, high_score=None):
+    def update(self, detections, high_score=None):
         """detections: list of dicts with keys label, box (xyxy), score
         (+ optional "z": 마스크 depth 중앙값 — 매칭 비용에 반영됨).
 
-        validate(track, det) -> bool: 관측 수락 전 외부 검증(depth 침입 등).
-        실패 시 커밋 없이 가림 처리 — 트랙 상태가 오염될 틈이 없다.
-
         high_score: 지정 시 2-pass 매칭(ByteTrack) — 이 값 미만 저점수
-        검출은 기존 트랙 유지에만 쓰고(가림 관측), 새 트랙·rescue는 불가.
+        검출은 기존 트랙 유지에만 쓰고, 새 트랙·rescue는 불가. 저점수
+        관측의 pose 오염은 필터 게이트가 막으므로 여기서 막지 않는다.
         Returns list of (track, detection) pairs.
         """
         if high_score is None:
@@ -173,25 +220,20 @@ class IouTracker:
         n_old = len(self.tracks)  # 이 아래에서 추가되는 새 트랙과 구분
         used_t = set()
 
-        # 1차: 고점수 검출 — 정상 관측 (depth 충돌 후보는 매칭에서 제외돼
-        # 가리개가 진짜 검출의 매칭을 뺏지 못한다)
+        # 1차: 고점수 검출 (depth 충돌 후보는 매칭에서 제외돼 가리개가
+        # 진짜 검출의 매칭을 뺏지 못한다)
         matched_high = set()
         for ti, d in self._greedy_match(high, used_t):
             t = self.tracks[ti]
             matched_high.add(id(d))
-            if validate is not None and not validate(t, d):
-                t.missed = 0       # 자리에 뭔가 있음은 확인됨 — 동결 타이머만 정지
-                t.flag_occluded()  # 검증 실패: box·score·EMA 어느 것도 커밋 안 함
-            else:
-                t.observe(d)
+            t.observe(d)
             pairs.append((t, d))
 
-        # 2차: 저점수 검출 — 부분 가림 중인 트랙의 생존 신호로만 사용
+        # 2차: 저점수 검출 — 부분 가림 중인 트랙의 생존·위치 신호
         for ti, d in self._greedy_match(low, used_t,
                                         exclude_depth_conflict=False):
             t = self.tracks[ti]
-            t.missed = 0
-            t.flag_occluded()  # 저점수 = 오염 가능성 — 커밋 없이 유지만
+            t.observe(d)
             pairs.append((t, d))
 
         # rescue·새 트랙은 고점수 검출만 가능
@@ -199,7 +241,8 @@ class IouTracker:
                            key=lambda d: -d["score"])
         for d in unmatched:
             # 가림 후 재등장 구조(rescue): buffered IoU(C-BIoU)로 범위를
-            # 한정해 동결 트랙에 복귀시킨다 — 원거리 오매칭 방지
+            # 한정해 동결 트랙에 복귀시킨다 — 원거리 오매칭 방지.
+            # depth 침입 검출은 가리개일 가능성이 높아 복귀 불가.
             frozen = [(ti, t) for ti, t in enumerate(self.tracks)
                       if t.label == d["label"] and t.missed > self.max_missed]
             if frozen:
@@ -207,11 +250,11 @@ class IouTracker:
                 ti, t = max(frozen, key=lambda f: box_iou(
                     _expand(f[1].box, self.rescue_buffer), eb))
                 if box_iou(_expand(t.box, self.rescue_buffer), eb) > 0 and \
-                        (validate is None or validate(t, d)):
+                        not _depth_conflict(t, d):
                     t.reactivate(d)
                     used_t.add(ti)
                     pairs.append((t, d))
-                continue  # 범위 밖·검증 실패면 동결 유지
+                continue  # 범위 밖·depth 충돌이면 동결 유지
             alive = sum(1 for t in self.tracks if t.label == d["label"])
             if self.max_per_label > 0 and alive >= self.max_per_label:
                 continue
@@ -226,7 +269,7 @@ class IouTracker:
                 t = self.tracks[ti]
                 t.missed += 1
                 if t.missed > self.max_missed:
-                    t.flag_occluded()  # 동결: 유지하되 발행·전파 중단
+                    t.frozen = True  # 동결: 유지하되 발행·전파 중단
         self.tracks = [t for t in self.tracks
                        if t.missed <= self.max_missed + self.occlusion_hold]
         return pairs
