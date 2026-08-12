@@ -45,3 +45,25 @@ def test_gradual_depth_change_not_flagged():
         t.mask, depth = make(mm)
         assert pipe._depth_ok(t, t.mask, depth)  # 점진 변화는 EMA가 따라감
         pipe._update_geometry(t, depth, K)
+
+
+def test_size_jump_rejected():
+    """크기 급변(오염 blob)은 pose 커밋을 거부한다 — 제3 신호."""
+    import numpy as np
+    from roboworld_perception.geometry import ObbResult
+    pipe = PerceptionPipeline(NoDetector())
+    t = Track(1, "obj", np.array([100, 100, 180, 160], float), 0.9)
+    t.mask, depth = make(1000)
+    for _ in range(3):
+        pipe._update_geometry(t, depth, K)
+    assert not t.occluded
+    obb_before = t.obb
+    # 마스크를 두 배 영역으로 확장 → 관측 크기 급변 (blob 시뮬레이션)
+    big = np.zeros((240, 320), bool)
+    big[60:200, 40:240] = True
+    d2 = np.zeros((240, 320), np.uint16)
+    d2[big] = 1000
+    t.mask = big
+    pipe._update_geometry(t, d2, K)
+    assert t.occluded              # 크기 신호로 오염 판정
+    assert t.obb is obb_before     # pose 미갱신

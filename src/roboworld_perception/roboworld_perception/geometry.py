@@ -68,6 +68,14 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
 # (test4 실측: 정상 0.92m, 침입 시 0.55m). 매칭 비용·검증이 공유하는 단일 정의.
 INTRUSION_RATIO = 0.8
 
+# 크기 급변 판정 — 관측 OBB 크기가 트랙 크기에서 "비율 30% 이상 그리고
+# 절대 3cm 이상" 튀면 오염(가리개와 합쳐진 blob). score·depth가 못 잡는
+# "닮은 가리개가 같은 높이에 겹친" 케이스용 제3 신호.
+# 절대량 조건이 없으면 얇은 축(책 높이 2cm)의 mm급 depth 노이즈가
+# 비율로는 30%를 넘어 오탐이 폭발한다 (실측: 책 관측 356→70프레임).
+SIZE_JUMP_RATIO = 0.3
+SIZE_JUMP_ABS = 0.03  # m
+
 
 def masked_depth_median(mask, depth, depth_scale=0.001, box=None,
                         z_range=(0.10, 3.0)):

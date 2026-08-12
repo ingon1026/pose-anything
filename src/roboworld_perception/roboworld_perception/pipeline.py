@@ -10,8 +10,8 @@ offline 스크립트와 ROS 노드가 공유하는 헬퍼(이미지 디코드, C
 import cv2
 import numpy as np
 
-from .geometry import (INTRUSION_RATIO, compute_obb, mask_depth_to_points,
-                       masked_depth_median)
+from .geometry import (INTRUSION_RATIO, SIZE_JUMP_ABS, SIZE_JUMP_RATIO,
+                       compute_obb, mask_depth_to_points, masked_depth_median)
 from .tracker import IouTracker
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
@@ -179,8 +179,20 @@ class PerceptionPipeline:
     def _update_geometry(self, track, depth, K):
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
+        obb = compute_obb(points)
+        # 제3 신호 — 크기 일관성: 물체 크기는 프레임 사이에 급변하지 않는다.
+        # 닮은 가리개가 같은 높이로 겹치면(score·depth 무력) 관측 blob의
+        # 크기가 튀는 것으로 오염을 잡는다.
+        if obb is not None and track.obb is not None:
+            new_e = np.sort(obb.extent)[::-1]
+            old_e = np.sort(track.obb.extent)[::-1]
+            diff = np.abs(new_e - old_e)
+            jump = (diff / (old_e + 1e-9) > SIZE_JUMP_RATIO) & (diff > SIZE_JUMP_ABS)
+            if jump.any():
+                track.flag_occluded()
+                return  # 오염 관측 — pose·기준선 어느 것도 갱신 안 함
         z = masked_depth_median(track.mask, depth, self.depth_scale, track.box)
         if z is not None:  # 정상 관측만 여기 도달 — 기준선 갱신
             track.depth_ema = z if track.depth_ema == 0 else \
                 0.9 * track.depth_ema + 0.1 * z
-        track.update_obb(compute_obb(points), self.ema, self.rot_alpha)
+        track.update_obb(obb, self.ema, self.rot_alpha)
