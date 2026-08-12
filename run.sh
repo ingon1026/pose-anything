@@ -40,15 +40,34 @@ echo ">> 소스: $SOURCE | 물체: $PROMPTS | threshold: $THRESHOLD"
 mkdir -p output
 
 source install/setup.bash
+
+# 이전 실행이 남긴 perception 노드 정리 — 노드가 쌓이면 GPU에 SAM3가
+# 중복 상주해 전체가 심하게 느려진다 (실측: 노드 4개 → 12GB 포화)
+if pgrep -f "roboworld_perception/perception_node" > /dev/null; then
+  echo ">> 이전 실행의 perception 노드가 남아 있어 정리합니다..."
+  pkill -f "roboworld_perception/perception_node" 2>/dev/null
+  sleep 2
+fi
+
+# 각 구성요소는 setsid로 자기 프로세스그룹을 만들어 띄우고, 종료 시 그룹
+# 전체(-PID)를 죽인다 — ros2 run 래퍼만 죽고 실제 노드(디버그 창)가
+# 고아로 살아남는 문제 방지. Ctrl+C·Enter·오류 어느 경로든 cleanup 하나로.
 PIDS=()
-trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
+cleanup() {
+  rc=$?
+  trap - INT TERM HUP EXIT
+  for pid in "${PIDS[@]}"; do kill -TERM -- -"$pid" 2>/dev/null; done
+  pkill -f "roboworld_perception/perception_node" 2>/dev/null  # 래퍼 미전달 대비
+  exit "$rc"
+}
+trap cleanup INT TERM HUP EXIT  # HUP: 터미널 창을 그냥 닫아도 노드 정리
 
 if [ "$SOURCE" = "live" ]; then
   if ros2 topic list 2>/dev/null | grep -q "^/camera/camera/color/image_raw$"; then
     echo ">> 이미 실행 중인 카메라 노드를 사용합니다 (중복 실행 방지)"
   else
     echo ">> RealSense 카메라 시작..."
-    ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
+    setsid ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
     PIDS+=($!)
   fi
 fi
@@ -58,7 +77,7 @@ CSV="output/ros_$(date +%Y%m%d_%H%M%S).csv"
 echo ">> 노드 시작 (SAM3 로딩 ~40초)..."
 DISPLAY_PARAM=true
 [ "$HEADLESS" = "1" ] && DISPLAY_PARAM=false
-ros2 run roboworld_perception perception_node --ros-args \
+setsid ros2 run roboworld_perception perception_node --ros-args \
   -p prompts:="$PROMPTS" -p score_threshold:="$THRESHOLD" \
   -p display:=$DISPLAY_PARAM -p csv_path:="$CSV" > "$LOG" 2>&1 &
 NODE_PID=$!
@@ -71,7 +90,7 @@ done
 if [ "$HEADLESS" = "1" ]; then
   echo ">> 준비 완료 (headless) — 토픽: /perception/detections"
 else
-  rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
+  setsid rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
   PIDS+=($!)
   echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"
 fi
