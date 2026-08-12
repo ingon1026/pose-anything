@@ -11,7 +11,8 @@ import cv2
 import numpy as np
 
 from .geometry import (INTRUSION_RATIO, SIZE_JUMP_ABS, SIZE_JUMP_RATIO,
-                       compute_obb, mask_depth_to_points, masked_depth_median)
+                       SIZE_REJECT_LIMIT, compute_obb, mask_depth_to_points,
+                       masked_depth_median)
 from .tracker import IouTracker
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
@@ -188,9 +189,15 @@ class PerceptionPipeline:
             old_e = np.sort(track.obb.extent)[::-1]
             diff = np.abs(new_e - old_e)
             jump = (diff / (old_e + 1e-9) > SIZE_JUMP_RATIO) & (diff > SIZE_JUMP_ABS)
-            if jump.any():
+            if jump.any() and track.size_rejects < SIZE_REJECT_LIMIT:
+                track.size_rejects += 1
                 track.flag_occluded()
                 return  # 오염 관측 — pose·기준선 어느 것도 갱신 안 함
+            if jump.any():
+                # 연속 거부 한도 초과 = 일시적 blob이 아니라 실제 변화 —
+                # 새 관측을 기준선으로 재적응 (교착 방지). EMA 대신 즉시 교체.
+                track.obb = obb
+        track.size_rejects = 0
         z = masked_depth_median(track.mask, depth, self.depth_scale, track.box)
         if z is not None:  # 정상 관측만 여기 도달 — 기준선 갱신
             track.depth_ema = z if track.depth_ema == 0 else \

@@ -75,6 +75,10 @@ INTRUSION_RATIO = 0.8
 # 비율로는 30%를 넘어 오탐이 폭발한다 (실측: 책 관측 356→70프레임).
 SIZE_JUMP_RATIO = 0.3
 SIZE_JUMP_ABS = 0.03  # m
+# 크기 거부가 이 횟수(키프레임) 연속되면 오염이 아니라 실제 변화로 보고
+# 새 관측을 기준선으로 재적응한다. 탈출구 없는 거부 게이트는 낡은 기준선에
+# 영원히 잠기는 교착을 만든다 (라이브 실측: 비가림 물체 3개가 OCCLUDED 고착).
+SIZE_REJECT_LIMIT = 3
 
 
 def masked_depth_median(mask, depth, depth_scale=0.001, box=None,

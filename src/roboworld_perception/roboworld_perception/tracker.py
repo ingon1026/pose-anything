@@ -46,6 +46,7 @@ class Track:
     score_ema: float = 0.0   # 정상 score 기준선 (부분 가림 판별용)
     depth_ema: float = 0.0   # 정상 depth 기준선(m) — 가리개 침입 판별용
     occluded: bool = False   # 완전/부분 가림 상태 — pose 발행 중단
+    size_rejects: int = 0    # 크기 게이트 연속 거부 횟수 (교착 탈출용)
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 
     def __post_init__(self):

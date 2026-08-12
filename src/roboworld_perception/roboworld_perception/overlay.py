@@ -23,6 +23,20 @@ def _project(points_3d, K):
     return (p[:, :2] / p[:, 2:3]).astype(int)
 
 
+def _obb_corners(obb):
+    signs = np.array([[(i >> 2) & 1, (i >> 1) & 1, i & 1]
+                      for i in range(8)]) * 2 - 1
+    return obb.center + (signs * obb.extent / 2) @ obb.R.T
+
+
+def _draw_obb_edges(bgr, obb, K, color):
+    corners = _obb_corners(obb)
+    if np.all(corners[:, 2] > 0.05):
+        px = _project(corners, K)
+        for a, b in _EDGES:
+            cv2.line(bgr, tuple(px[a]), tuple(px[b]), color, 2)
+
+
 def _label_y(box, n_lines, frame_h):
     """라벨 y 위치 — 박스 위 기본, 상단에 붙으면 박스 아래로 (단일 규칙)."""
     y = int(box[1]) - 8 - 17 * n_lines
@@ -58,9 +72,13 @@ def draw_objects(bgr, objects, K):
         x1, y1 = int(obj.box[0]), int(obj.box[1])
 
         if obj.occluded:
-            # 가림 상태: 마지막 박스 위치를 회색 외곽선으로만 표시
-            cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
-                          (128, 128, 128), 2)
+            # 가림 상태: 마지막으로 알던 3D 박스를 회색으로 유지 표시 —
+            # "사라짐"이 아니라 "잠시 못 보는 중"임을 보여준다
+            if obj.obb is not None:
+                _draw_obb_edges(bgr, obj.obb, K, (150, 150, 150))
+            else:
+                cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
+                              (150, 150, 150), 2)
             lines = [f"{obj.label}#{obj.track_id} OCCLUDED"]
             texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0]), lines))
             continue
@@ -75,13 +93,9 @@ def draw_objects(bgr, objects, K):
         lines = [f"{obj.label}#{obj.track_id} {obj.score:.2f}"]
         if obj.obb is not None:
             o = obj.obb
-            signs = np.array([[(i >> 2) & 1, (i >> 1) & 1, i & 1]
-                              for i in range(8)]) * 2 - 1
-            corners = o.center + (signs * o.extent / 2) @ o.R.T
+            _draw_obb_edges(bgr, o, K, color)
+            corners = _obb_corners(o)
             if np.all(corners[:, 2] > 0.05):
-                px = _project(corners, K)
-                for a, b in _EDGES:
-                    cv2.line(bgr, tuple(px[a]), tuple(px[b]), color, 2)
                 # local axes: X red, Y green, Z blue (OpenCV BGR)
                 axis_len = o.extent / 2 + 0.03
                 c2d = _project(o.center[None], K)[0]

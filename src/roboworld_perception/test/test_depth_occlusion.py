@@ -67,3 +67,26 @@ def test_size_jump_rejected():
     pipe._update_geometry(t, d2, K)
     assert t.occluded              # 크기 신호로 오염 판정
     assert t.obb is obb_before     # pose 미갱신
+
+
+def test_size_gate_escapes_deadlock():
+    """크기 거부가 연속되면 실제 변화로 보고 재적응 — 영구 OCCLUDED 방지."""
+    import numpy as np
+    pipe = PerceptionPipeline(NoDetector())
+    t = Track(1, "obj", np.array([100, 100, 180, 160], float), 0.9)
+    t.mask, depth = make(1000)
+    for _ in range(3):
+        pipe._update_geometry(t, depth, K)
+    big = np.zeros((240, 320), bool)
+    big[60:200, 40:240] = True
+    d2 = np.zeros((240, 320), np.uint16)
+    d2[big] = 1000
+    t.mask = big
+    for i in range(3):  # SIZE_REJECT_LIMIT 동안은 거부
+        t.occluded = False
+        pipe._update_geometry(t, d2, K)
+        assert t.occluded, f"reject {i+1}"
+    t.occluded = False   # 4번째 — 지속되는 변화는 새 현실로 수락
+    pipe._update_geometry(t, d2, K)
+    assert not t.occluded
+    assert t.size_rejects == 0
