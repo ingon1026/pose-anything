@@ -36,8 +36,8 @@ flowchart LR
     C --> E["IoU tracker<br/>persistent IDs"]
     D --> E
     E --> F["mask + depth + K<br/>→ point cloud (MAD filter)<br/>→ Open3D OBB"]
-    F --> G["temporal stabilization<br/>axis continuity · deadband · slerp"]
-    G --> H["Detection3DArray<br/>RViz markers · debug video · CSV"]
+    F --> G["per-track Kalman fusion<br/>χ² gating · axis continuity · slerp"]
+    G --> H["Detection3DArray + covariance<br/>RViz markers · debug video · CSV"]
 ```
 
 Running the 848M-parameter SAM 3 on every frame caps throughput at ~3 FPS.
@@ -50,11 +50,19 @@ new OBB against the previous frame's axes, ignores sub-2° jitter (deadband), an
 slerps the rest — bringing yaw noise down from 3.5° to **0.94° per frame** with zero
 90°/180° axis flips.
 
-Occlusions are caught by two independent signals — detection-score collapse
-relative to the track's own baseline, and **depth intrusion** in the mask region
-(an occluder is always closer to the camera than the object, so it can't be
-fooled by look-alike appearance). Occluded tracks are frozen instead of deleted,
-stale poses are never published, and the track is re-identified on reappearance.
+Observation quality is judged by a **per-track probabilistic filter** rather than
+hand-tuned thresholds: each track runs a small constant-velocity Kalman filter over
+its center and size, and every observation must pass a χ² gate against the track's
+own state and learned noise level. A corrupted observation — an occluder intruding
+in depth, a look-alike object overlapping at the same height, a half-visible mask —
+is rejected and the last good pose is kept (drawn greyed out; publishing stops 0.5 s
+after the last accepted observation, so stale poses never reach a consumer). Because
+rejections grow the filter's uncertainty, the gate re-opens on its own: a genuine
+change is re-accepted within ~2 s while a large occluder stays rejected far longer
+than any real occlusion lasts — the system cannot deadlock into a permanently
+"occluded" state. Frozen tracks are re-identified on reappearance, and every
+published pose carries its position uncertainty in `PoseWithCovariance` so a robot
+can gate grasping on confidence.
 
 ## Measured results
 
@@ -64,7 +72,7 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 |---|---|
 | Track ID persistence (3 moving objects, 20 s) | single ID each, 0 axis flips |
 | OBB size vs. real objects | within ±1 cm |
-| Center jitter (static objects) | ≤ 1.3 mm std |
+| Center jitter (static objects) | ≤ 1.5 mm std |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
 | Occlusion robustness (hand/object passing over, 29 events) | IDs survive all occlusions; stale poses suppressed; pose resumes ≈ 0.3 s (median) after reappearance |
 | Throughput (3 prompts, RTX 4070 Ti) | ~9 FPS |
