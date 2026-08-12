@@ -57,26 +57,26 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      # 위에서 수직으로 내려다보는 직교 시점 — 카메라 영상과 좌우·상하가
-      # 그대로 일치한다 (world = 광학 좌표계를 Rx(180°)로 세운 것)
-      Class: rviz_default_plugins/TopDownOrtho
-      Angle: 0
+      # 남쪽 위에서 비스듬히 내려다보는 궤도 시점 — 카메라 영상과 좌우가
+      # 일치하면서(가방→책 = 왼→오른쪽) 좌클릭 회전·육면체 입체감 유지
+      Class: rviz_default_plugins/Orbit
+      Distance: 2.0
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
       Name: Current View
-      Scale: 450
-      X: 0
-      Y: 0
-      Value: TopDownOrtho (rviz)
+      Pitch: 1.05
+      Yaw: 4.712
+      Value: Orbit (rviz)
     Saved:
-      - Class: rviz_default_plugins/Orbit
-        Distance: 1.8
-        Focal Point:
-          X: 0
-          Y: 0
-          Z: 0.1
-        Name: 자유 궤도
-        Pitch: 0.9
-        Yaw: 4.71
-        Value: Orbit (rviz)
+      - Class: rviz_default_plugins/TopDownOrtho
+        Angle: 0
+        Name: 수직 탑뷰 (영상과 동일)
+        Scale: 450
+        X: 0
+        Y: 0
+        Value: TopDownOrtho (rviz)
 Window Geometry:
   Displays:
     collapsed: false
