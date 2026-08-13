@@ -42,12 +42,22 @@ def img_to_np(msg):
         ch, dtype = 3, np.uint8
     elif msg.encoding == "16UC1":
         ch, dtype = 1, np.uint16
+    elif msg.encoding == "32FC1":
+        # Isaac Sim 의 depth. RealSense 는 16UC1 밀리미터인데 Isaac 은
+        # float32 미터로 낸다. 아래에서 밀리미터로 환산해 돌려주므로
+        # geometry.py 의 depth_scale=0.001 이 그대로 맞는다.
+        ch, dtype = 1, np.float32
     else:
         raise ValueError(f"unsupported encoding {msg.encoding}")
     itemsize = np.dtype(dtype).itemsize
     arr = np.frombuffer(msg.data, dtype).reshape(msg.height, msg.step // itemsize)
     arr = arr[:, :msg.width * ch]
-    return arr.reshape(msg.height, msg.width, ch).squeeze()
+    arr = arr.reshape(msg.height, msg.width, ch).squeeze()
+    if dtype is np.float32:
+        # inf/NaN 은 "값 없음" 이다. RealSense 규약대로 0 으로 둔다.
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        arr = np.clip(arr * 1000.0, 0, 65535).astype(np.uint16)
+    return arr
 
 
 def status_text(fps, pipeline, objects):
