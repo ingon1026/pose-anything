@@ -73,6 +73,29 @@ Depth 실측 범위는 0.862 ~ 1.515 m 였다. 최솟값 0.862 는
 `1.408 - 0.862 = 0.546` 으로 로봇 베이스 높이 0.554 와 일치한다 — 씬을 제대로
 보고 있다는 교차검증이다.
 
+### 카메라 → 월드 변환 (정답 대조용)
+
+USD 에서 읽은 `/Sensors/cam_belt` 의 월드 자세는 **회전이 전혀 없다**
+(회전행렬 = 단위행렬). 정확히 수직 하방을 본다.
+
+```
+위치      (-0.3150, -0.6820, 1.4080)
+보는 방향  월드 (0, 0, -1)
+```
+
+검출 결과는 `camera_color_optical_frame` 으로 나온다. ROS optical 규약
+(x 오른쪽, y 아래, z 전방) 이므로 월드 변환이 이렇게 단순해진다:
+
+```
+world_x = -0.315 + x_optical
+world_y = -0.682 - y_optical
+world_z =  1.408 - z_optical
+```
+
+검증: 블록 윗면을 검출했을 때 `z_optical = 0.945` → `world_z = 0.463`.
+실제 윗면은 `0.435 + 0.055/2 = 0.4625` 이므로 **오차 0.5 mm**. 깊이 경로는
+단위·규약 모두 올바르다.
+
 ---
 
 ## 3. 코드 변경 (1건)
@@ -166,6 +189,32 @@ K        : fx=645.71  cx=640.0  cy=360.0    <- 1280x720 기준값
 계산하면 통째로 틀어진다. **해상도를 바꾸려면 그래프를 지우고 다시 만들어야 한다**
 (Windows 쪽 `cellomni_ros2_rebuild.py` 의 `RES` 수정 후 재실행).
 
+### 4.3b 그래프를 지워도 ROS 퍼블리셔는 안 죽는다 ← 조용히 절반으로 틀어짐
+
+§4.3 때문에 그래프를 재생성하면, **옛 퍼블리셔가 살아남아 옛 해상도의 K 를
+계속 뿌린다.** `DeletePrims` 는 OmniGraph 프림만 지우고 SDG 라이터가 만든
+ROS 2 퍼블리셔는 정리하지 않는다. 실측:
+
+```
+/camera/camera/color/camera_info    Publisher count: 2
+   _Render_PostProcess_SDGPipeline_Replicator_NodeWriterWriter_01   <- 옛 그래프 (1280x720)
+   _Render_PostProcess_SDGPipeline_Replicator_NodeWriterWriter_04   <- 새 그래프 (640x360)
+```
+
+구독자는 둘 중 **먼저 온 것을 캐시**한다. 잘못 걸리면 이미지는 640 폭인데
+K 는 `fx=645.71 / cx=640` 이라 계산된 위치·크기가 **정확히 절반**이 된다.
+실제로 이 상태에서 200x55 mm 블록이 95x24 mm 로 나왔다.
+
+에러도 경고도 없다. 반드시 확인할 것:
+
+```bash
+ros2 topic info /camera/camera/color/camera_info --verbose --no-daemon
+# Publisher count 가 1 이어야 한다
+```
+
+**해상도를 바꾸려면 Isaac Sim 을 껐다 켜고 그래프를 한 번만 만들어야 한다.**
+같은 세션에서 재생성하면 안 된다.
+
 ### 4.4 Depth 는 Z-depth 다 (RealSense 와 같은 규약)
 
 `ROS2CameraHelper` 의 `type="depth"` 는 `DistanceToImagePlaneSD` AOV 로 간다
@@ -244,6 +293,30 @@ OgnSdPostRenderVarToHost : rendervar copy from texture directly to host buffer
 is counter-performant. Please use copy from texture to device buffer first.
 ```
 
+### 6a. GPU 경쟁 — 인식 노드 자신이 프레임률을 3.6배 깎는다
+
+RTX 4070 Ti 12 GB 한 장에서 Isaac 의 RTX 렌더링과 SAM3 추론이 경쟁한다.
+A/B 실측 (다른 조건 동일):
+
+| | perception_node 켜짐 | 꺼짐 |
+|---|---|---|
+| GPU 메모리 | 10.3 GB / 12.3 | **7.9 GB** |
+| RGB | 0.70 Hz | **2.55 Hz** |
+| Depth | 0.25 Hz | 1.10 Hz |
+
+즉 **"라이브로 붙여서 보는" 구성 자체가 프레임률의 주된 손실원**이다.
+브리지(HTTP 콘솔)도 앱 틱을 30 → 18 Hz 로 떨어뜨리므로 같이 끄는 게 좋다.
+
+**권장 작업 방식 — 녹화 후 오프라인 처리.**
+정확도·가려짐 평가가 목적이라면 라이브로 붙일 이유가 없다:
+
+1. 인식 노드를 끈 상태로 Isaac 토픽을 `ros2 bag record` 로 녹화 (최대 속도로)
+2. 녹화된 bag 에 SAM 을 오프라인으로 돌린다 (`scripts/run_offline.py` 가 이미 있다)
+
+GPU 경쟁이 사라지므로 Isaac 은 최대 속도로 렌더하고 SAM 은 전력으로 추론한다.
+게다가 같은 데이터를 반복 재현할 수 있어 파라미터 비교에 유리하다.
+라이브 연결은 "눈으로 확인" 용도로만 쓰는 것을 권한다.
+
 시도했지만 효과가 미미했던 것:
 
 - `net.core.rmem_max` 212992 → 16777216 : 1.5 → 2.0 Hz (거의 차이 없음)
@@ -255,6 +328,51 @@ is counter-performant. Please use copy from texture to device buffer first.
 **파이프라인 검증에는 2 Hz 로도 충분하다.** `detect_interval=5` 로 SAM 을 띄엄띄엄
 돌리는 구조이므로 정적 검출·자세 계산은 지금 바로 평가할 수 있다.
 다만 **추적 안정성·시간적 평활 평가는 이 속도로는 의미가 없다.**
+
+---
+
+## 6b. 첫 검증 결과 (2026-08-13 실측)
+
+`prompts:="blue plastic bar"`, `score_threshold:=0.25`, `max_per_prompt:=12`,
+640x360. 벨트 정지, 블록 9개 초기 배치.
+
+**텍스트 프롬프트 검출은 합성 영상에서 잘 먹는다** — score 0.93~0.94.
+도메인 갭 걱정은 기우였다.
+
+정답 대비 절대 오차 (월드 좌표, 한 프레임):
+
+| 월드 x | 정답 x | dx | dy | dz | 마스크 크기 L x W | score |
+|---|---|---|---|---|---|---|
+| -0.950 | -0.950 | **-0.1 mm** | 0.0 | 0.5 | 193.2 x 47.7 | 0.93 |
+| -0.700 | -0.700 | **+0.2 mm** | 0.0 | 0.5 | 196.3 x 49.3 | 0.93 |
+| -0.450 | -0.450 | **+0.3 mm** | 0.1 | 0.5 | 193.8 x 49.6 | 0.94 |
+| -0.204 | -0.200 | -3.8 mm | 0.1 | 0.5 | 194.1 x 50.5 | 0.93 |
+| +0.026 | +0.050 | **-24.2 mm** | 0.1 | **-29.5** | **151.4** x 50.9 | 0.93 |
+| +0.275 | +0.300 | **-24.6 mm** | 0.1 | **-29.5** | **155.1** x 52.3 | 0.93 |
+
+- **가려지지 않은 블록은 밀리미터 이하**로 맞는다 (dx <= 0.3 mm, dz 0.5 mm).
+- **y 오차는 전부 0.1 mm 이내** — 카메라가 벨트 중심선 바로 위라 관측이 가장 좋은 축.
+- 오른쪽 두 블록(x = +0.05, +0.30)만 dx -24 mm, dz -30 mm 로 크게 튄다.
+  **로봇 팔이 그 위를 덮고 있어** 마스크가 194 mm → 151/155 mm 로 잘렸다.
+  즉 **가려짐이 자세 추정을 어떻게 망가뜨리는지가 정량적으로 찍힌다.**
+  `output/occ_*` 실험에 그대로 이어붙일 수 있는 데이터다.
+- 크기는 정답 200 x 55 mm 대비 193~196 x 48~52 mm. 마스크가 변당 2~3 mm 안쪽으로
+  들어온다 (SAM 마스크의 체계적 수축).
+- **높이는 항상 0.000 m** — 위에서 내려다보므로 윗면만 보이고 점군이 평면이다
+  (`qhull: initial hull is narrow` 경고의 정체). top-down 단일 시점의 구조적 한계.
+
+한 프레임에서 6개가 잡혔고 오버레이의 tracker 는 9개를 유지했다. 프레임이
+1.5~2 Hz 로 띄엄띄엄 오는 탓에 프레임별 검출 수가 흔들린다 (§6).
+
+> `max_per_prompt` 기본값이 **1** 이라 그냥 실행하면 한 개만 나온다.
+> `perception.launch.py` 는 이 파라미터를 노출하지 않으므로, 여러 개를 보려면
+> 설치된 실행파일을 직접 부른다 (이 환경에는 `ros2 run` 이 없다):
+>
+> ```bash
+> ./install/roboworld_perception/lib/roboworld_perception/perception_node \
+>   --ros-args -p prompts:="blue plastic bar" -p max_per_prompt:=12 \
+>   -p score_threshold:=0.25 -p publish_world_tf:=false
+> ```
 
 ---
 
