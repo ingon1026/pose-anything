@@ -52,6 +52,19 @@ class PerceptionNode(Node):
                                "/camera/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("info_topic", "/camera/camera/color/camera_info")
         self.declare_parameter("csv_path", "")
+        # 입력이 이만큼 끊기면 잔상 마커를 지운다(_watchdog).
+        # 2.0 초는 bag 재생 기준이라 실시간 Isaac Sim 에는 너무 짧다 —
+        # WSL2 로 640x360 컬러(675 KB)를 보내면 3~4 초 공백이 예사라
+        # 정상 동작 중에도 매번 DELETEALL 이 나가 마커가 통째로
+        # 사라졌다 나타난다. 이것이 RViz 깜빡임의 주원인이다.
+        self.declare_parameter("stale_timeout", 5.0)
+        # SAM3 입력 해상도. 0 = 기본 1008px.
+        # Isaac Sim 과 GPU 를 나눠 쓰면 VRAM 이 부족해지고, 그러면 렌더프로덕트
+        # 텍스처가 재할당되면서 ROS2 발행 노드가 들고 있던 CUDA 핸들이 무효가
+        # 된다(OgnROS2PublishImage.cpp:466, cudaErrorInvalidResourceHandle).
+        # 그 뒤로는 이미지 토픽이 통째로 죽는다 — 재시작 말고는 복구가 안 된다.
+        # 카메라가 640x360 이므로 1008 은 업스케일이라 낭비다.
+        self.declare_parameter("image_size", 0)
         # 카메라가 "위(1m)에서 아래를 본다"는 world TF. RealSense TF 트리의
         # 뿌리(camera_link) 위에 붙인다 — optical frame에 직접 붙이면 bag이
         # 함께 녹화한 내부 트리와 부모가 둘이 되어 TF가 깨진다. 실제 로봇
@@ -76,7 +89,8 @@ class PerceptionNode(Node):
         threshold = self.get_parameter("score_threshold").value
         self.get_logger().info(f"loading SAM3... prompts={self.prompts}")
         self.pipeline = PerceptionPipeline(
-            Sam3Detector(threshold=threshold),
+            Sam3Detector(threshold=threshold,
+                         image_size=self.get_parameter("image_size").value),
             detect_interval=self.get_parameter("detect_interval").value,
             max_per_prompt=self.get_parameter("max_per_prompt").value)
         # run.sh가 이 문자열을 grep으로 대기한다 — 문구 변경 시 run.sh도 수정
@@ -89,6 +103,11 @@ class PerceptionNode(Node):
         self._fps_ema = 0.0
         self._last_frame_time = None
         self._stale_cleared = True
+        self._stale_timeout = float(self.get_parameter("stale_timeout").value)
+        # 직전 사이클에 실제로 발행한 (ns, id). 사라진 것만 골라 지우기 위해
+        # 들고 있는다 — 매번 DELETEALL 을 쏘면 RViz 가 지움과 다시 그림
+        # 사이를 렌더링해 깜빡인다.
+        self._prev_marker_ids = set()
         self.create_timer(1.0, self._watchdog)
 
         self.pub_det = self.create_publisher(Detection3DArray,
@@ -130,12 +149,14 @@ class PerceptionNode(Node):
         """입력이 끊기면(bag 종료 등) 잔상 마커를 정리한다."""
         if self._stale_cleared or self._last_frame_time is None:
             return
-        if time.monotonic() - self._last_frame_time > 2.0:
+        if time.monotonic() - self._last_frame_time > self._stale_timeout:
             markers = MarkerArray()
             markers.markers.append(Marker(action=Marker.DELETEALL))
             self.pub_markers.publish(markers)
             self._stale_cleared = True
-            self.get_logger().info("입력 없음 2초 — 마커 정리")
+            self._prev_marker_ids = set()
+            self.get_logger().info(
+                "입력 없음 %.1f초 — 마커 정리" % self._stale_timeout)
 
     def on_frames(self, color_msg: Image, depth_msg: Image):
         if self.K is None or self._busy or not self.prompts:
@@ -167,7 +188,10 @@ class PerceptionNode(Node):
         det_array.header.stamp = stamp
         det_array.header.frame_id = self.frame_id
         markers = MarkerArray()
-        markers.markers.append(Marker(action=Marker.DELETEALL))
+        # DELETEALL 을 앞세우지 않는다. 같은 ns/id 로 다시 보내면 RViz 가
+        # 알아서 덮어쓰므로, 지움 없이 갱신하면 깜빡이지 않는다.
+        # 사라진 것만 아래에서 골라 DELETE 한다.
+        cur_marker_ids = set()
 
         stamp_s = stamp.sec + stamp.nanosec * 1e-9
         for obj in objects:
@@ -236,8 +260,20 @@ class PerceptionNode(Node):
             text.text = f"{en}#{obj.track_id} {o.distance:.2f}m"
             markers.markers.append(text)
 
+            cur_marker_ids.update(
+                (("obb", obj.track_id), ("axes", obj.track_id),
+                 ("label", obj.track_id)))
+
             if self.csv_writer:
                 self.csv_writer.writerow(csv_row(obj, stamp_s, proc_ms))
+
+        # 직전에 있었는데 이번에 빠진 것만 지운다.
+        for ns, mid in self._prev_marker_ids - cur_marker_ids:
+            gone = Marker()
+            gone.header = det_array.header
+            gone.ns, gone.id, gone.action = ns, mid, Marker.DELETE
+            markers.markers.append(gone)
+        self._prev_marker_ids = cur_marker_ids
 
         self.pub_det.publish(det_array)
         self.pub_markers.publish(markers)

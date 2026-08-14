@@ -37,11 +37,18 @@ def _draw_obb_edges(bgr, obb, K, color):
             cv2.line(bgr, tuple(px[a]), tuple(px[b]), color, 2)
 
 
-def _label_y(box, n_lines, frame_h):
-    """라벨 y 위치 — 박스 위 기본, 상단에 붙으면 박스 아래로 (단일 규칙)."""
-    y = int(box[1]) - 8 - 17 * n_lines
+def _label_y(box, n_lines, frame_h, rank=0):
+    """라벨 y 위치 — 박스 위 기본, 상단에 붙으면 박스 아래로 (단일 규칙).
+
+    rank 는 같은 프레임 안에서 몇 번째 물체인지. 컨베이어처럼 같은 높이에
+    물체가 늘어선 장면은 박스 y 가 전부 같아 라벨이 한 자리에 겹쳐 쌓인다
+    (실측: 블록 7 개 라벨이 통째로 뭉개져 못 읽음). 계단식으로 어긋낸다.
+    """
+    step = 17 * n_lines + 4
+    y = int(box[1]) - 8 - 17 * n_lines - (rank % 3) * step
     if y < 2:
-        y = min(int(box[3]) + 6, frame_h - 17 * n_lines - 2)
+        y = min(int(box[3]) + 6 + (rank % 3) * step,
+                frame_h - 17 * n_lines - 2)
     return y
 
 
@@ -67,7 +74,12 @@ def show_window(bgr):
 def draw_objects(bgr, objects, K):
     """objects: list of tracker.Track. Draws in place, returns bgr."""
     texts = []
+    # 라벨 계단 순서는 화면 왼→오른쪽 기준이어야 이웃끼리 안 겹친다.
+    # track_id 순서로 매기면 벨트 위 인접 물체가 같은 단에 걸릴 수 있다.
+    rank_of = {id(o): i for i, o in
+               enumerate(sorted(objects, key=lambda o: o.box[0]))}
     for obj in objects:
+        rank = rank_of[id(obj)]
         color = PALETTE[obj.track_id % len(PALETTE)]
         x1, y1 = int(obj.box[0]), int(obj.box[1])
 
@@ -80,7 +92,7 @@ def draw_objects(bgr, objects, K):
                 cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
                               (150, 150, 150), 2)
             lines = [f"{obj.label}#{obj.track_id} OCCLUDED"]
-            texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0]), lines))
+            texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
             continue
 
         # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
@@ -109,7 +121,7 @@ def draw_objects(bgr, objects, K):
             lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
                       f"whd=({w:.3f},{d:.3f},{h:.3f})m",
                       f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
-        texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0]), lines))
+        texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
 
     if texts:
         pil = Image.fromarray(bgr[:, :, ::-1])
