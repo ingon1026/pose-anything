@@ -70,6 +70,17 @@ class PerceptionNode(Node):
         # 함께 녹화한 내부 트리와 부모가 둘이 되어 TF가 깨진다. 실제 로봇
         # TF 트리와 통합할 때는 이 파라미터를 꺼서 충돌을 피한다.
         self.declare_parameter("publish_world_tf", True)
+        # camera_link -> camera_color_optical_frame. RealSense 드라이버가 돌면
+        # 드라이버가 채워주므로 건드릴 필요가 없지만, Isaac Sim 이 이미지를
+        # 직접 발행하는 구성에는 드라이버가 없어 이 링크를 아무도 안 보낸다.
+        # 그러면 world -> camera_link 가 있어도 검출이 실려오는 optical frame
+        # 까지 사슬이 닿지 않아 RViz 가 마커를 놓지 못한다.
+        # 기본값 False 인 이유: bag 재생처럼 RealSense 내부 트리가 이미 녹화된
+        # 경우 같은 자식 프레임에 부모가 둘이 되어 멀쩡했던 TF 가 깨진다.
+        # 켜서 생기는 고장은 증상이 엉뚱한 곳에 나타나 원인 찾기가 어렵고,
+        # 꺼서 생기는 부족은 publish_optical_tf:=true 한 줄로 끝난다.
+        self.declare_parameter("publish_optical_tf", False)
+        static_tfs = []
         if self.get_parameter("publish_world_tf").value:
             t = TransformStamped()
             t.header.stamp = self.get_clock().now().to_msg()
@@ -81,9 +92,31 @@ class PerceptionNode(Node):
             (t.transform.rotation.x, t.transform.rotation.y,
              t.transform.rotation.z, t.transform.rotation.w) = \
                 (-0.5, 0.5, 0.5, 0.5)
+            static_tfs.append(t)
+        if self.get_parameter("publish_optical_tf").value:
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = "camera_link"
+            # camera_info 가 오면 self.frame_id 가 갱신되지만 정적 TF 는 여기서
+            # 한 번 발행하고 끝이라 그때까지 기다릴 수 없다 — 아래 기본값과
+            # 같은 이름을 쓴다. Isaac Sim 이 다른 optical frame 이름을 실어
+            # 보내면 이 링크는 붙지 않으니 camera_info 쪽을 맞춰야 한다.
+            t.child_frame_id = "camera_color_optical_frame"
+            # REP-103: camera_link(x앞 y왼 z위) -> optical(x오른 y아래 z앞).
+            # 이 값으로 RViz TF 사슬이 이어지는 것을 실제로 확인했다.
+            (t.transform.rotation.x, t.transform.rotation.y,
+             t.transform.rotation.z, t.transform.rotation.w) = \
+                (-0.5, 0.5, -0.5, 0.5)
+            static_tfs.append(t)
+        if static_tfs:
+            # 반드시 리스트로 한 번에 보낸다. StaticTransformBroadcaster 의
+            # 발행자 QoS 는 depth=1 TRANSIENT_LOCAL 이라 늦게 켠 구독자는
+            # "마지막 메시지" 하나만 받는다 — sendTransform 을 두 번 나눠
+            # 부르면, 누적해서 재발행하지 않는 구현에서는 먼저 보낸 변환이
+            # 통째로 사라진다.
             # latched 발행자는 살아 있어야 늦게 켠 RViz도 받는다 — 노드에 보관
             self._tf_bcast = StaticTransformBroadcaster(self)
-            self._tf_bcast.sendTransform(t)
+            self._tf_bcast.sendTransform(static_tfs)
 
         self.prompts = parse_prompts(self.get_parameter("prompts").value)
         threshold = self.get_parameter("score_threshold").value

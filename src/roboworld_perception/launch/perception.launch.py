@@ -21,6 +21,10 @@ def generate_launch_description():
         DeclareLaunchArgument("detect_interval", default_value="5"),
         DeclareLaunchArgument("stale_timeout", default_value="5.0"),
         DeclareLaunchArgument("image_size", default_value="0"),
+        # Isaac Sim 이 이미지를 직접 발행하면 RealSense 드라이버가 없어
+        # camera_link -> camera_color_optical_frame 이 비므로 여기서 켠다.
+        # bag 재생에는 그 링크가 이미 녹화돼 있어 켜면 TF 가 깨진다 — 기본 false.
+        DeclareLaunchArgument("publish_optical_tf", default_value="false"),
         Node(
             package="rviz2",
             executable="rviz2",
@@ -46,6 +50,9 @@ def generate_launch_description():
                     LaunchConfiguration("stale_timeout"), value_type=float),
                 "image_size": ParameterValue(
                     LaunchConfiguration("image_size"), value_type=int),
+                "publish_optical_tf": ParameterValue(
+                    LaunchConfiguration("publish_optical_tf"),
+                    value_type=bool),
             }],
         ),
     ])

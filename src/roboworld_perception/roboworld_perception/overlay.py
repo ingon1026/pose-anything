@@ -10,6 +10,15 @@ try:
 except OSError:  # 폰트 없는 환경(미설치 컨테이너 등)에서는 기본 폰트로 동작
     _FONT = ImageFont.load_default(15)
 
+# 라벨 외곽선 두께. 폭 측정(_label_x)과 실제 렌더(draw.text)가 같은 값을
+# 봐야 하므로 상수로 묶는다 — 한쪽만 건드리면 딱 그만큼 다시 잘려 나간다.
+_STROKE = 2
+
+# 폭 측정 전용 스크래치 draw. 실제 렌더용 draw 는 draw_objects 후반부에서야
+# 만들어지는데 x 보정은 texts 를 모으는 시점에 이미 필요하다. 1x1 이라
+# 생성 비용은 무시할 수준이고, 모듈 로드 시 한 번만 만든다.
+_MEASURE = ImageDraw.Draw(Image.new("L", (1, 1)))
+
 PALETTE = [(66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53),
            (171, 71, 188), (0, 172, 193), (255, 112, 67), (124, 179, 66)]
 
@@ -52,6 +61,34 @@ def _label_y(box, n_lines, frame_h, rank=0):
     return y
 
 
+def _label_x(x, lines, frame_w):
+    """라벨 x 위치 — 오른쪽으로 넘칠 만큼 왼쪽으로 당긴다.
+
+    라벨은 박스 왼쪽 x1 에서 시작해 그려지므로 물체가 화면 오른쪽에 있으면
+    글자가 그대로 잘려 나갔다 (실측 640x360: "blue plastic block#5 0.9" 에서
+    끝 자리가 사라지고 "whd=(0.161,0.057,0.0" 처럼 괄호가 안 닫힘).
+
+    폭은 textlength() 가 아니라 textbbox(stroke_width=) 로 잰다. 외곽선이
+    글자 좌우로 _STROKE 만큼 번져 나가는데 textlength 는 그걸 포함하지 않아
+    딱 그만큼 덜 당기게 된다. bbox 는 앵커 기준 상대 좌표라 left 가 보통
+    -_STROKE 로 음수다 — 그래서 왼쪽 여유도 이 값에서 그대로 얻는다.
+
+    한 물체의 줄들은 폭이 제각각이고(가장 긴 건 대개 d=/xyz= 줄, 241px)
+    전부 같은 x 를 공유하므로 최댓값으로 맞춰야 한 줄도 안 잘린다.
+    """
+    if not lines:
+        return x
+    boxes = [_MEASURE.textbbox((0, 0), s, font=_FONT, stroke_width=_STROKE)
+             for s in lines]
+    left = min(b[0] for b in boxes)
+    right = max(b[2] for b in boxes)
+    x = min(x, frame_w - right)
+    # 왼쪽 보정을 오른쪽 다음에 두는 게 핵심: 라벨 블록이 화면보다 넓으면
+    # (좁은 프레임 + 긴 한글 라벨) 오른쪽은 포기하고 왼쪽 끝에 붙여야
+    # 앞부분의 라벨명·track_id 라도 읽힌다.
+    return int(max(x, -left))
+
+
 def draw_status(bgr, text):
     """좌상단 상태 표시줄 (ASCII 전용, 처리 상태 확인용)."""
     cv2.putText(bgr, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -92,7 +129,8 @@ def draw_objects(bgr, objects, K):
                 cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
                               (150, 150, 150), 2)
             lines = [f"{obj.label}#{obj.track_id} OCCLUDED"]
-            texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
+            texts.append((_label_x(x1, lines, bgr.shape[1]),
+                          _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
             continue
 
         # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
@@ -121,7 +159,8 @@ def draw_objects(bgr, objects, K):
             lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
                       f"whd=({w:.3f},{d:.3f},{h:.3f})m",
                       f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
-        texts.append((x1, _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
+        texts.append((_label_x(x1, lines, bgr.shape[1]),
+                      _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
 
     if texts:
         pil = Image.fromarray(bgr[:, :, ::-1])
@@ -129,6 +168,6 @@ def draw_objects(bgr, objects, K):
         for x, y, lines in texts:
             for i, line in enumerate(lines):
                 draw.text((x, y + 17 * i), line, font=_FONT, fill=(255, 255, 255),
-                          stroke_width=2, stroke_fill=(0, 0, 0))
+                          stroke_width=_STROKE, stroke_fill=(0, 0, 0))
         bgr[:] = np.asarray(pil)[:, :, ::-1]
     return bgr
