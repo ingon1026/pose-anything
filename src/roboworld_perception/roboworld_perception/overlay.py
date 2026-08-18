@@ -108,8 +108,12 @@ def _place_label(box, forms, placed, frame_w, frame_h):
             n = _hits(rect, placed)
             if n == 0:
                 return x, y, lines, rect
-            if best is None or n < best[0]:
-                best = (n, x, y, lines, rect)
+            # 동점이면 짧은 형식을 고른다. 어차피 겹칠 바에는 덮는 면적이
+            # 작은 쪽이 아래 라벨을 덜 가린다 — 먼저 시도한 긴 형식이
+            # 이기면 자리가 아무 데도 없을 때 화면이 가장 지저분해진다.
+            key = (n, len(lines))
+            if best is None or key < best[0]:
+                best = (key, x, y, lines, rect)
     return best[1], best[2], best[3], best[4]
 
 
