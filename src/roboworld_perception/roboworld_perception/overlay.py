@@ -46,19 +46,75 @@ def _draw_obb_edges(bgr, obb, K, color):
             cv2.line(bgr, tuple(px[a]), tuple(px[b]), color, 2)
 
 
-def _label_y(box, n_lines, frame_h, rank=0):
-    """라벨 y 위치 — 박스 위 기본, 상단에 붙으면 박스 아래로 (단일 규칙).
+_LINE_H = 17
 
-    rank 는 같은 프레임 안에서 몇 번째 물체인지. 컨베이어처럼 같은 높이에
-    물체가 늘어선 장면은 박스 y 가 전부 같아 라벨이 한 자리에 겹쳐 쌓인다
-    (실측: 블록 7 개 라벨이 통째로 뭉개져 못 읽음). 계단식으로 어긋낸다.
+
+def _extent(lines):
+    """라벨 블록의 (left, right). _label_x 와 같은 stroke 기준으로 잰다."""
+    boxes = [_MEASURE.textbbox((0, 0), s, font=_FONT, stroke_width=_STROKE)
+             for s in lines]
+    return min(b[0] for b in boxes), max(b[2] for b in boxes)
+
+
+def _label_ys(box, n_lines, frame_h):
+    """라벨 y 후보 — 박스 위쪽을 가까운 순으로, 다 막히면 아래쪽.
+
+    같은 높이에 물체가 늘어선 컨베이어 장면은 박스 y 가 전부 같아 라벨이
+    한 자리에 쌓인다. 예전에는 rank % 3 으로 3 단만 어긋냈는데, 블록 9 개가
+    한 줄로 서면 0·3·6 번이 같은 단에 걸린다. 라벨 폭이 241 px 라 640 px
+    프레임에 3 개가 못 들어가 글자끼리 섞였다 (실측: "block#2 0.95" 와
+    "ue plastic block#7" 이 한 줄에 겹쳐 그려짐).
+
+    그래서 고정 단수를 버린다. 여기서는 후보만 넉넉히 내고, 실제로 비어
+    있는 자리를 고르는 일은 _place_label 이 한다.
     """
-    step = 17 * n_lines + 4
-    y = int(box[1]) - 8 - 17 * n_lines - (rank % 3) * step
-    if y < 2:
-        y = min(int(box[3]) + 6 + (rank % 3) * step,
-                frame_h - 17 * n_lines - 2)
-    return y
+    h = _LINE_H * n_lines
+    step = h + 4
+    ys = []
+    top = int(box[1]) - 8 - h
+    while top >= 2 and len(ys) < 12:
+        ys.append(top)
+        top -= step
+    bot = int(box[3]) + 6
+    while bot + h <= frame_h - 2 and len(ys) < 24:
+        ys.append(bot)
+        bot += step
+    if not ys:                       # 프레임보다 라벨이 큰 극단
+        ys.append(max(2, frame_h - h - 2))
+    return ys
+
+
+def _hits(rect, placed):
+    """placed 중 rect 와 겹치는 개수. 2 px 여유를 둬 글자끼리 붙지 않게 한다."""
+    x0, y0, x1, y1 = rect[0] - 2, rect[1] - 2, rect[2] + 2, rect[3] + 2
+    return sum(1 for p in placed
+               if not (x1 <= p[0] or p[2] <= x0 or y1 <= p[1] or p[3] <= y0))
+
+
+def _place_label(box, forms, placed, frame_w, frame_h):
+    """빈 자리를 찾아 (x, y, lines, rect) 를 돌려준다.
+
+    forms 는 긴 형식부터 짧은 형식 순으로 준다. 긴 형식이 어디에도 안
+    들어가면 짧은 형식으로 내려간다 — 자리가 없는데 그대로 그려서 글자가
+    섞이는 것보다, 정보를 줄여서라도 읽히게 하는 편이 낫다.
+    전부 실패하면 겹침이 가장 적은 자리를 쓴다 (아무것도 안 그리는 것보다 낫다).
+    """
+    best = None
+    for lines in forms:
+        left, right = _extent(lines)
+        for y in _label_ys(box, len(lines), frame_h):
+            x = _label_x(int(box[0]), lines, frame_w)
+            rect = (x + left, y, x + right, y + _LINE_H * len(lines))
+            n = _hits(rect, placed)
+            if n == 0:
+                return x, y, lines, rect
+            # 동점이면 짧은 형식을 고른다. 어차피 겹칠 바에는 덮는 면적이
+            # 작은 쪽이 아래 라벨을 덜 가린다 — 먼저 시도한 긴 형식이
+            # 이기면 자리가 아무 데도 없을 때 화면이 가장 지저분해진다.
+            key = (n, len(lines))
+            if best is None or key < best[0]:
+                best = (key, x, y, lines, rect)
+    return best[1], best[2], best[3], best[4]
 
 
 def _label_x(x, lines, frame_w):
@@ -111,12 +167,11 @@ def show_window(bgr):
 def draw_objects(bgr, objects, K):
     """objects: list of tracker.Track. Draws in place, returns bgr."""
     texts = []
-    # 라벨 계단 순서는 화면 왼→오른쪽 기준이어야 이웃끼리 안 겹친다.
-    # track_id 순서로 매기면 벨트 위 인접 물체가 같은 단에 걸릴 수 있다.
-    rank_of = {id(o): i for i, o in
-               enumerate(sorted(objects, key=lambda o: o.box[0]))}
-    for obj in objects:
-        rank = rank_of[id(obj)]
+    placed = []
+    frame_h, frame_w = bgr.shape[0], bgr.shape[1]
+    # 왼→오른쪽 순으로 자리를 잡아야 이웃끼리 예측 가능하게 나눠 갖는다.
+    # track_id 순으로 하면 벨트 위 인접 물체가 뒤죽박죽 자리를 다툰다.
+    for obj in sorted(objects, key=lambda o: o.box[0]):
         color = PALETTE[obj.track_id % len(PALETTE)]
         x1, y1 = int(obj.box[0]), int(obj.box[1])
 
@@ -128,46 +183,50 @@ def draw_objects(bgr, objects, K):
             else:
                 cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
                               (150, 150, 150), 2)
-            lines = [f"{obj.label}#{obj.track_id} OCCLUDED"]
-            texts.append((_label_x(x1, lines, bgr.shape[1]),
-                          _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
-            continue
+            forms = [[f"{obj.label}#{obj.track_id} OCCLUDED"],
+                     [f"#{obj.track_id} OCC"]]
+        else:
+            # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
+            bgr[obj.mask] = (0.35 * np.array(color) + 0.65 * bgr[obj.mask]) \
+                .astype(np.uint8)
+            contours, _ = cv2.findContours(obj.mask.astype(np.uint8),
+                                           cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(bgr, contours, -1, color, 2)
 
-        # 마스크 픽셀만 블렌드 (전체 프레임 복사 회피 — 물체당 ~3ms 절약)
-        bgr[obj.mask] = (0.35 * np.array(color) + 0.65 * bgr[obj.mask]) \
-            .astype(np.uint8)
-        contours, _ = cv2.findContours(obj.mask.astype(np.uint8),
-                                       cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(bgr, contours, -1, color, 2)
+            head = f"{obj.label}#{obj.track_id} {obj.score:.2f}"
+            lines = [head]
+            if obj.obb is not None:
+                o = obj.obb
+                _draw_obb_edges(bgr, o, K, color)
+                corners = _obb_corners(o)
+                if np.all(corners[:, 2] > 0.05):
+                    # local axes: X red, Y green, Z blue (OpenCV BGR)
+                    axis_len = o.extent / 2 + 0.03
+                    c2d = _project(o.center[None], K)[0]
+                    for k, axc in enumerate([(0, 0, 255), (0, 255, 0), (255, 0, 0)]):
+                        tip = o.center + o.R[:, k] * axis_len[k]
+                        if tip[2] > 0.05:
+                            cv2.arrowedLine(bgr, tuple(c2d), tuple(_project(tip[None], K)[0]),
+                                            axc, 2, tipLength=0.2)
+                r, p, y = o.rpy
+                w, d, h = o.extent
+                lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
+                          f"whd=({w:.3f},{d:.3f},{h:.3f})m",
+                          f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
+            # 전체 → 머리줄만 → track_id 와 점수만. 좁을수록 아래로 내려간다.
+            forms = [lines, [head], [f"#{obj.track_id} {obj.score:.2f}"]]
 
-        lines = [f"{obj.label}#{obj.track_id} {obj.score:.2f}"]
-        if obj.obb is not None:
-            o = obj.obb
-            _draw_obb_edges(bgr, o, K, color)
-            corners = _obb_corners(o)
-            if np.all(corners[:, 2] > 0.05):
-                # local axes: X red, Y green, Z blue (OpenCV BGR)
-                axis_len = o.extent / 2 + 0.03
-                c2d = _project(o.center[None], K)[0]
-                for k, axc in enumerate([(0, 0, 255), (0, 255, 0), (255, 0, 0)]):
-                    tip = o.center + o.R[:, k] * axis_len[k]
-                    if tip[2] > 0.05:
-                        cv2.arrowedLine(bgr, tuple(c2d), tuple(_project(tip[None], K)[0]),
-                                        axc, 2, tipLength=0.2)
-            r, p, y = o.rpy
-            w, d, h = o.extent
-            lines += [f"d={o.distance:.3f}m xyz=({o.center[0]:.3f},{o.center[1]:.3f},{o.center[2]:.3f})",
-                      f"whd=({w:.3f},{d:.3f},{h:.3f})m",
-                      f"rpy=({r:.1f},{p:.1f},{y:.1f})deg"]
-        texts.append((_label_x(x1, lines, bgr.shape[1]),
-                      _label_y(obj.box, len(lines), bgr.shape[0], rank), lines))
+        x, y, lines, rect = _place_label(obj.box, forms, placed,
+                                         frame_w, frame_h)
+        placed.append(rect)
+        texts.append((x, y, lines))
 
     if texts:
         pil = Image.fromarray(bgr[:, :, ::-1])
         draw = ImageDraw.Draw(pil)
         for x, y, lines in texts:
             for i, line in enumerate(lines):
-                draw.text((x, y + 17 * i), line, font=_FONT, fill=(255, 255, 255),
+                draw.text((x, y + _LINE_H * i), line, font=_FONT, fill=(255, 255, 255),
                           stroke_width=_STROKE, stroke_fill=(0, 0, 0))
         bgr[:] = np.asarray(pil)[:, :, ::-1]
     return bgr
