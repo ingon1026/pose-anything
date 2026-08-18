@@ -43,6 +43,9 @@ _PASSTHROUGH = [
     ("csv_path", ""),
     ("max_per_prompt", "1"),
     ("stale_timeout", "5.0"),
+    ("world_frame", "world"),
+    ("camera_link_frame", "camera_link"),
+    ("optical_frame", "camera_color_optical_frame"),
 ]
 
 

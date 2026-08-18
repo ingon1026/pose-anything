@@ -80,12 +80,24 @@ class PerceptionNode(Node):
         # 켜서 생기는 고장은 증상이 엉뚱한 곳에 나타나 원인 찾기가 어렵고,
         # 꺼서 생기는 부족은 publish_optical_tf:=true 한 줄로 끝난다.
         self.declare_parameter("publish_optical_tf", False)
+        # 프레임 이름. 정적 TF 는 __init__ 에서 한 번 발행하고 끝이라
+        # camera_info 가 실어오는 실제 optical frame 이름을 기다릴 수 없다.
+        # 하드코딩해 두면 다른 이름이 오는 순간 사슬이 조용히 끊기고 RViz 에
+        # 마커만 안 보인다 — 그래서 밖에서 맞출 수 있게 뺀다.
+        # optical_frame 은 camera_info 가 오기 전까지 self.frame_id 의
+        # 기본값으로도 쓰이므로 두 곳이 항상 같은 값을 본다.
+        self.declare_parameter("world_frame", "world")
+        self.declare_parameter("camera_link_frame", "camera_link")
+        self.declare_parameter("optical_frame", "camera_color_optical_frame")
+        world_frame = self.get_parameter("world_frame").value
+        link_frame = self.get_parameter("camera_link_frame").value
+        optical_frame = self.get_parameter("optical_frame").value
         static_tfs = []
         if self.get_parameter("publish_world_tf").value:
             t = TransformStamped()
             t.header.stamp = self.get_clock().now().to_msg()
-            t.header.frame_id = "world"
-            t.child_frame_id = "camera_link"
+            t.header.frame_id = world_frame
+            t.child_frame_id = link_frame
             t.transform.translation.z = 1.0  # 카메라 높이 (시각화용 공칭값)
             # Rz(90°)·Ry(90°): 수직 하방 시선 + 영상 우/하 = world +X/−Y —
             # RViz TopDownOrtho(위에서 보기)가 카메라 영상과 같은 방향이 된다
@@ -96,12 +108,11 @@ class PerceptionNode(Node):
         if self.get_parameter("publish_optical_tf").value:
             t = TransformStamped()
             t.header.stamp = self.get_clock().now().to_msg()
-            t.header.frame_id = "camera_link"
+            t.header.frame_id = link_frame
             # camera_info 가 오면 self.frame_id 가 갱신되지만 정적 TF 는 여기서
-            # 한 번 발행하고 끝이라 그때까지 기다릴 수 없다 — 아래 기본값과
-            # 같은 이름을 쓴다. Isaac Sim 이 다른 optical frame 이름을 실어
-            # 보내면 이 링크는 붙지 않으니 camera_info 쪽을 맞춰야 한다.
-            t.child_frame_id = "camera_color_optical_frame"
+            # 한 번 발행하고 끝이라 그때까지 기다릴 수 없다. 다른 이름이 오면
+            # optical_frame:=<그 이름> 으로 맞춘다.
+            t.child_frame_id = optical_frame
             # REP-103: camera_link(x앞 y왼 z위) -> optical(x오른 y아래 z앞).
             # 이 값으로 RViz TF 사슬이 이어지는 것을 실제로 확인했다.
             (t.transform.rotation.x, t.transform.rotation.y,
@@ -130,7 +141,7 @@ class PerceptionNode(Node):
         self.get_logger().info("SAM3 ready")
 
         self.K = None
-        self.frame_id = "camera_color_optical_frame"
+        self.frame_id = optical_frame
         self._busy = False
         self._display = self.get_parameter("display").value
         self._fps_ema = 0.0

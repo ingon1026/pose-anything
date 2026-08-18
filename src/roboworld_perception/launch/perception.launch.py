@@ -25,6 +25,13 @@ def generate_launch_description():
         # camera_link -> camera_color_optical_frame 이 비므로 여기서 켠다.
         # bag 재생에는 그 링크가 이미 녹화돼 있어 켜면 TF 가 깨진다 — 기본 false.
         DeclareLaunchArgument("publish_optical_tf", default_value="false"),
+        # 프레임 이름. 정적 TF 는 camera_info 보다 먼저 발행되므로 실제
+        # optical frame 이름을 기다릴 수 없다 — 다르면 여기서 맞춘다.
+        DeclareLaunchArgument("world_frame", default_value="world"),
+        DeclareLaunchArgument("camera_link_frame",
+                              default_value="camera_link"),
+        DeclareLaunchArgument("optical_frame",
+                              default_value="camera_color_optical_frame"),
         Node(
             package="rviz2",
             executable="rviz2",
@@ -53,6 +60,10 @@ def generate_launch_description():
                 "publish_optical_tf": ParameterValue(
                     LaunchConfiguration("publish_optical_tf"),
                     value_type=bool),
+                "world_frame": LaunchConfiguration("world_frame"),
+                "camera_link_frame": LaunchConfiguration(
+                    "camera_link_frame"),
+                "optical_frame": LaunchConfiguration("optical_frame"),
             }],
         ),
     ])
