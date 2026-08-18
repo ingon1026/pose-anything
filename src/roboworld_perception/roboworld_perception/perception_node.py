@@ -86,6 +86,11 @@ class PerceptionNode(Node):
         # 마커만 안 보인다 — 그래서 밖에서 맞출 수 있게 뺀다.
         # optical_frame 은 camera_info 가 오기 전까지 self.frame_id 의
         # 기본값으로도 쓰이므로 두 곳이 항상 같은 값을 본다.
+        # world_frame 을 바꾸면 rviz/perception.rviz 의 Fixed Frame 도 함께
+        # 고쳐야 한다(현재 "world" 고정). 안 그러면 노드는 새 이름으로
+        # 발행하는데 RViz 는 옛 이름을 기다려 "마커만 안 보이는" 증상이
+        # 난다 — 이 파라미터가 없애려던 바로 그 증상이라 원인을 엉뚱한
+        # 데서 찾게 된다.
         self.declare_parameter("world_frame", "world")
         self.declare_parameter("camera_link_frame", "camera_link")
         self.declare_parameter("optical_frame", "camera_color_optical_frame")

@@ -13,7 +13,7 @@ docs/isaac_sim_stability_2026-08-14.md 에 실측과 함께 적혀 있다.
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 # (인자, Isaac 기본값, 왜 base 와 다른가)
@@ -35,28 +35,17 @@ _PRESET = [
     ("rviz", "false"),
 ]
 
-# base launch 가 갖고 있는 나머지 인자 — 값을 바꾸지 않고 그대로 넘긴다.
-# 여기 빠뜨리면 사용자가 준 값이 조용히 무시되고 base 기본값이 남는다.
-_PASSTHROUGH = [
-    ("prompts", "물통"),
-    ("score_threshold", "0.4"),
-    ("csv_path", ""),
-    ("max_per_prompt", "1"),
-    ("stale_timeout", "5.0"),
-    ("world_frame", "world"),
-    ("camera_link_frame", "camera_link"),
-    ("optical_frame", "camera_color_optical_frame"),
-]
-
-
 def generate_launch_description():
-    args = _PRESET + _PASSTHROUGH
+    # base 의 나머지 인자는 다시 적지 않는다. IncludeLaunchDescription 은
+    # 설정 스코프를 새로 만들지 않고, DeclareLaunchArgument 는 아직 값이
+    # 없을 때만 기본값을 넣는다. 그래서 CLI 로 준 값은 그대로 base 까지
+    # 흘러가고, 안 준 것은 base 자신의 기본값이 살아난다.
+    # 여기서 굳이 다시 적으면 base 의 기본값을 옛 값으로 못 박게 된다 —
+    # max_per_prompt 를 1 로 고정해 버리는 식의 조용한 사고가 난다.
     return LaunchDescription(
-        [DeclareLaunchArgument(n, default_value=v) for n, v in args]
+        [DeclareLaunchArgument(n, default_value=v) for n, v in _PRESET]
         + [IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution(
                 [FindPackageShare("roboworld_perception"), "launch",
-                 "perception.launch.py"])),
-            launch_arguments=[(n, LaunchConfiguration(n)) for n, _ in args],
-        )]
+                 "perception.launch.py"])))]
     )

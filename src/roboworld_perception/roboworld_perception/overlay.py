@@ -4,11 +4,16 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 # cv2.putText cannot render Korean labels; use PIL with a CJK font.
+_FONT_PX = 15
+# 줄 간격 = 글자 크기 + leading. _FONT_PX 만 바꿔도 다단 라벨이 겹치지 않게
+# 함께 움직여야 한다 — 예전에는 17 이 폰트 크기와 무관한 상수로 떠 있었다.
+_LINE_H = _FONT_PX + 2
+
 try:
     _FONT = ImageFont.truetype(
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 15)
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", _FONT_PX)
 except OSError:  # 폰트 없는 환경(미설치 컨테이너 등)에서는 기본 폰트로 동작
-    _FONT = ImageFont.load_default(15)
+    _FONT = ImageFont.load_default(_FONT_PX)
 
 # 라벨 외곽선 두께. 폭 측정(_label_x)과 실제 렌더(draw.text)가 같은 값을
 # 봐야 하므로 상수로 묶는다 — 한쪽만 건드리면 딱 그만큼 다시 잘려 나간다.
@@ -46,7 +51,9 @@ def _draw_obb_edges(bgr, obb, K, color):
             cv2.line(bgr, tuple(px[a]), tuple(px[b]), color, 2)
 
 
-_LINE_H = 17
+# 라벨 y 후보를 방향별로 이만큼까지만 만든다. 프레임 경계로도 종료되므로
+# 종료 조건이 아니라 탐색량 상한이다.
+_MAX_TIERS = 12
 
 
 def _extent(lines):
@@ -54,6 +61,16 @@ def _extent(lines):
     boxes = [_MEASURE.textbbox((0, 0), s, font=_FONT, stroke_width=_STROKE)
              for s in lines]
     return min(b[0] for b in boxes), max(b[2] for b in boxes)
+
+
+def _clamp_x(x, left, right, frame_w):
+    """측정된 (left, right) 로 라벨 x 를 프레임 안에 밀어 넣는다.
+
+    왼쪽 보정을 오른쪽 다음에 두는 게 핵심: 라벨 블록이 화면보다 넓으면
+    (좁은 프레임 + 긴 한글 라벨) 오른쪽은 포기하고 왼쪽 끝에 붙여야
+    앞부분의 라벨명·track_id 라도 읽힌다.
+    """
+    return int(max(min(x, frame_w - right), -left))
 
 
 def _label_ys(box, n_lines, frame_h):
@@ -72,11 +89,12 @@ def _label_ys(box, n_lines, frame_h):
     step = h + 4
     ys = []
     top = int(box[1]) - 8 - h
-    while top >= 2 and len(ys) < 12:
+    while top >= 2 and len(ys) < _MAX_TIERS:
         ys.append(top)
         top -= step
-    bot = int(box[3]) + 6
-    while bot + h <= frame_h - 2 and len(ys) < 24:
+    n_above = len(ys)          # 아래쪽은 따로 센다 — 누적으로 세면 위가 꽉 찬
+    bot = int(box[3]) + 6      # 박스일수록 아래 후보가 줄어드는 비대칭이 생긴다
+    while bot + h <= frame_h - 2 and len(ys) - n_above < _MAX_TIERS:
         ys.append(bot)
         bot += step
     if not ys:                       # 프레임보다 라벨이 큰 극단
@@ -102,19 +120,23 @@ def _place_label(box, forms, placed, frame_w, frame_h):
     best = None
     for lines in forms:
         left, right = _extent(lines)
+        # x 는 y 에 의존하지 않는다 — 이 탐색은 세로 방향으로만 자리를 옮긴다.
+        # 루프 안에서 다시 구하면 후보 수만큼 폰트 측정이 되풀이된다
+        # (textbbox 1 회 ≈ 171 us, 12 개 장면에서 프레임당 30~50 ms).
+        x = _clamp_x(int(box[0]), left, right, frame_w)
         for y in _label_ys(box, len(lines), frame_h):
-            x = _label_x(int(box[0]), lines, frame_w)
             rect = (x + left, y, x + right, y + _LINE_H * len(lines))
             n = _hits(rect, placed)
+            result = (x, y, lines, rect)
             if n == 0:
-                return x, y, lines, rect
+                return result
             # 동점이면 짧은 형식을 고른다. 어차피 겹칠 바에는 덮는 면적이
             # 작은 쪽이 아래 라벨을 덜 가린다 — 먼저 시도한 긴 형식이
             # 이기면 자리가 아무 데도 없을 때 화면이 가장 지저분해진다.
             key = (n, len(lines))
             if best is None or key < best[0]:
-                best = (key, x, y, lines, rect)
-    return best[1], best[2], best[3], best[4]
+                best = (key, result)
+    return best[1]
 
 
 def _label_x(x, lines, frame_w):
@@ -134,15 +156,7 @@ def _label_x(x, lines, frame_w):
     """
     if not lines:
         return x
-    boxes = [_MEASURE.textbbox((0, 0), s, font=_FONT, stroke_width=_STROKE)
-             for s in lines]
-    left = min(b[0] for b in boxes)
-    right = max(b[2] for b in boxes)
-    x = min(x, frame_w - right)
-    # 왼쪽 보정을 오른쪽 다음에 두는 게 핵심: 라벨 블록이 화면보다 넓으면
-    # (좁은 프레임 + 긴 한글 라벨) 오른쪽은 포기하고 왼쪽 끝에 붙여야
-    # 앞부분의 라벨명·track_id 라도 읽힌다.
-    return int(max(x, -left))
+    return _clamp_x(x, *_extent(lines), frame_w)
 
 
 def draw_status(bgr, text):
@@ -173,7 +187,6 @@ def draw_objects(bgr, objects, K):
     # track_id 순으로 하면 벨트 위 인접 물체가 뒤죽박죽 자리를 다툰다.
     for obj in sorted(objects, key=lambda o: o.box[0]):
         color = PALETTE[obj.track_id % len(PALETTE)]
-        x1, y1 = int(obj.box[0]), int(obj.box[1])
 
         if obj.occluded:
             # 가림 상태: 마지막으로 알던 3D 박스를 회색으로 유지 표시 —
@@ -181,7 +194,9 @@ def draw_objects(bgr, objects, K):
             if obj.obb is not None:
                 _draw_obb_edges(bgr, obj.obb, K, (150, 150, 150))
             else:
-                cv2.rectangle(bgr, (x1, y1), (int(obj.box[2]), int(obj.box[3])),
+                cv2.rectangle(bgr,
+                              (int(obj.box[0]), int(obj.box[1])),
+                              (int(obj.box[2]), int(obj.box[3])),
                               (150, 150, 150), 2)
             forms = [[f"{obj.label}#{obj.track_id} OCCLUDED"],
                      [f"#{obj.track_id} OCC"]]
