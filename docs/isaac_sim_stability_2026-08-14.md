@@ -404,7 +404,124 @@ bash -ic 'echo $RMW_IMPLEMENTATION'   # rmw_fastrtps_cpp
 
 ---
 
-## 9. 실측 성능 (참고)
+## 9. 이미지가 초당 1.3 장밖에 안 온다 - DDS 단편화 (2026-08-19 해결)
+
+640x360 카메라를 40 Hz 로 발행하는데 WSL2 에 **초당 1.3 장**만 도착했다.
+큰 이미지만 그랬고 `camera_info` 는 40 Hz 로 멀쩡했다. 최대 공백이 7~9 초라
+`stale_timeout=5.0` 이 걸려 "입력 없음" 이 떴다.
+
+### 답: 샘플 데이터를 TCP 로 옮긴다
+
+**Windows 런처와 WSL `~/.bashrc` 양쪽에** 같은 값을 넣는다. 한쪽만이면 안 붙는다.
+
+```
+FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA?max_msg_size=190KB&sockets_size=200KB&non_blocking=true&tcp_negotiation_timeout=50
+```
+
+| 지표 | 이전 | 이후 |
+|---|---:|---:|
+| color / depth | 1.3 Hz | **39.0 Hz** |
+| 최대 공백 | 7~9 초 | **0.03 초** |
+| 스탬프 일치 (slop 0.05) | 11~16% | **100%** (3509/3509) |
+| 실효 대역폭 | 2.5 MB/s | **62.8 MB/s** |
+| 선로 바이트 / goodput | 10.7 배 | **1.05 배** |
+| `/perception/detections` | 0.78 Hz | **4.16 Hz** |
+
+해상도도 K 도 그대로다 (640x360, fx=322.8556).
+
+### 왜 그랬나
+
+Fast DDS 는 UDP 로 보낼 때 샘플을 **63 KB 데이터그램**으로 쪼갠다
+(`s_maximumMessageSize = 65500`). depth 921,600 B = 데이터그램 15 개 =
+**IP 패킷 약 640 개**. 실측 42.7 단편/데이터그램.
+
+데이터그램이 통째로 유실되면 리더는 다음 하트비트까지 뭐가 빠졌는지 모른다.
+**Fast DDS 기본 `heartbeatPeriod` 는 3 초다**
+(`fastdds/rtps/attributes/WriterAttributes.h`). 그래서 재전송 왕복이 3 초 +
+알파가 되고, 그 사이 라이터 히스토리가 차서 발행이 막힌다. 관측된 4~8 초
+공백이 이것이다.
+
+**커널 카운터 실측이 결정적이었다.** 선로에는 12.86 MB/s 가 흐르는데 완성된
+이미지는 1.2 MB/s 뿐이었다 - **90% 가 재전송**. 즉 "관이 좁다" 가 아니라
+"같은 물을 열 번 붓는다" 였다. TCP 로 바꾸니 재전송/흐름제어를 커널이
+밀리초 단위로 처리하고, IP 재조립 카운터가 **증가 자체를 멈췄다**.
+
+`camera_info` 가 멀쩡했던 이유도 이것이다 - 수백 바이트라 **단편화가 없다.**
+
+### 제약 (어기면 통신이 통째로 끊긴다)
+
+    max_msg_size <= sockets_size <= net.core.rmem_max
+
+WSL 기본 `rmem_max` 는 **212992 (208 KB)** 다. `sockets_size=1MB` 를 주면:
+
+```
+[TRANSPORT_TCP Error] Couldn't set buffer sizes to minimum value: 1000000
+[RTPS_PARTICIPANT Error] User transport failed to register.
+```
+
+트랜스포트 등록이 실패하고 **모든 토픽이 사라진다.** `max_msg_size` 가
+`sockets_size` 보다 커도 `max_message_size cannot be greater than segment_size`
+로 같은 결과다. 둘 다 밟았다.
+
+이건 오히려 다행이다 - 이 저장소의 다른 함정들(§5 launch 인자, §8 `.bashrc`,
+`--arg` 스코프, `frameSkipCount`)은 전부 **조용히 무시**되는 종류인데,
+이것만은 요란하게 실패해서 원인을 즉시 알려준다.
+
+### 같이 넣은 것: 이미지 발행 큐 제거
+
+```
+--/exts/isaacsim.ros2.bridge/publish_with_queue_thread=false
+--/exts/isaacsim.ros2.bridge/publish_multithreading_disabled=true
+```
+
+Isaac 은 **모든 이미지 토픽을 워커 스레드 하나**로 발행한다
+(`OgnROS2PublishImage.cpp`, `PublishImageWorkerThread` 싱글턴). 큐에 상한도
+백프레셔도 없어서 초과분이 계속 쌓인다. 이 설정은 NVIDIA 가
+`isaacsim.exp.base.zero_delay.kit` 로 배포하는 조합이다.
+
+TCP 로 바꾸기 전 단독 효과: 최대 공백 7~9 초 -> **1.83 초**.
+
+**크래시도 이 큐가 원인이었다.** 2026-08-19 실측:
+
+```
+OgnROS2PublishImage::publishImageHelper (:464)
+  -> cudaMemcpy2DFromArrayAsync -> nvcuda64.dll ACCESS_VIOLATION (0xC0000005)
+     스레드: PublishImageWorkerThread
+```
+
+464 줄은 `eR32_SFLOAT` 분기 = **depth 전용**이다. depth 는 렌더프로덕트
+텍스처 포인터를 **소유권 없이** 큐에 넣는데, 워커가 수 초 뒤 꺼낼 땐 텍스처가
+회수돼 있다. color 는 렌더 스레드에서 즉시 Isaac 소유 버퍼로 복사하므로
+안전하다 - **크래시가 depth 에서만 난 것과 정확히 일치한다.**
+`cudaError` 로그는 0 건이었다 (CUDA_CHECK 가 로그만 찍고, 회수된 핸들은
+성공 반환 뒤 드라이버 내부에서 폴트한다).
+
+### 시도했으나 소용없던 것 (다시 하지 말 것)
+
+전부 **렌더 쪽 레버**였고, 병목이 렌더 이후라 근본적으로 못 고쳤다.
+
+| 시도 | 결과 |
+|---|---|
+| SDG `IsaacSimulationGate.inputs:step` 조절 | 정렬만 41~52% 로 개선, 처리량 그대로. 폐기된 경로다 |
+| 안 쓰는 1280x720 렌더프로덕트 비활성화 | **악화** (29~35%). 프레임이 빨라져 프레임 기준 스로틀이 풀린다 |
+| `omni:sensor:tickRate` | 아래 참고 |
+| `RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS` | **악화** (color 0.52 Hz) |
+| `publish_with_queue_thread=false` + 멀티스레딩 **켬** | **악화** (color 0.57 Hz) |
+| Isaac 을 네이티브 Ubuntu 로 이전 | **근거 없음.** WSL2 경로는 재조립 실패 0 으로 7 MB/s 를 무손실로 날랐다. 무죄다 |
+
+### `omni:sensor:tickRate` 는 렌더프로덕트 생성 **전에** 걸어야 한다
+
+`frameSkipCount` 는 6.0 에서 폐기됐고 대체가 `tickRate` 다. 그런데 렌더프로덕트가
+이미 만들어진 뒤에 걸면 **조용히 무시된다.** 판정은 `camera_info` 발행률로
+한다 - 안 먹으면 40 Hz 그대로, 먹으면 tickRate 근처로 떨어진다 (실측 8.7 Hz).
+
+순서: 씬 로드 -> `OmniSensorAPI` 적용 + `tickRate` 설정 -> **그 다음** 그래프 생성.
+
+`/rtx/hydra/supportMultiTickRate` 가 true 여야 한다 (기본 true, 확인함).
+
+**단, TCP 로 고친 뒤에는 tickRate 가 필요 없다.** 39 Hz 가 그대로 나온다.
+
+## 10. 실측 성능 (참고)
 
 640x360 기준, 카메라 → WSL 수신률:
 
@@ -431,7 +548,7 @@ depth 의 구조적 한계다.
 
 ---
 
-## 10. 다음 세션에서 할 것
+## 11. 다음 세션에서 할 것
 
 2026-08-18 에 아래 다섯 개를 처리했다.
 
