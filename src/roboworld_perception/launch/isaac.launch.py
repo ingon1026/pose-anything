@@ -41,6 +41,11 @@ _PRESET = [
     # 두 스트림의 발행률이 다르면(color 0.5 Hz / depth 0.3 Hz) 느린 쪽을
     # 기다리는 동안 빠른 쪽 큐가 밀려난다.
     ("sync_queue_size", "30"),
+    # base 기본값 1 은 벨트 위 블록을 하나만 잡는다. 씬에는 8 개가 올라가 있어
+    # 나머지 7 개가 조용히 버려진다 — 에러가 없어서 알아채기 어렵다.
+    # 실측(2026-08-19, 96 프레임): 프레임당 고유 트랙 평균 7.7 개 / 최대 8 개.
+    # 8 에 딱 맞추면 블록이 하나 더 들어오거나 마스크가 갈릴 때 잘리므로 여유를 둔다.
+    ("max_per_prompt", "10"),
 ]
 
 def generate_launch_description():
@@ -49,7 +54,8 @@ def generate_launch_description():
     # 없을 때만 기본값을 넣는다. 그래서 CLI 로 준 값은 그대로 base 까지
     # 흘러가고, 안 준 것은 base 자신의 기본값이 살아난다.
     # 여기서 굳이 다시 적으면 base 의 기본값을 옛 값으로 못 박게 된다 —
-    # max_per_prompt 를 1 로 고정해 버리는 식의 조용한 사고가 난다.
+    # score_threshold 를 옛 값으로 고정해 버리는 식의 조용한 사고가 난다.
+    # (프리셋에 올리는 것은 실측 근거가 있는 값만. 위 _PRESET 참고.)
     return LaunchDescription(
         [DeclareLaunchArgument(n, default_value=v) for n, v in _PRESET]
         + [IncludeLaunchDescription(
