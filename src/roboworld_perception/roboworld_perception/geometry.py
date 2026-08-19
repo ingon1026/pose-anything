@@ -29,12 +29,14 @@ class ObbResult:
 
 
 def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
-                         z_range=(0.10, 3.0), erode_px=3):
+                         z_range=(0.10, 3.0), erode_px=3,
+                         near_band=0.040, far_band=0.010):
     """Back-project masked depth pixels to 3D points (camera optical frame).
 
     depth: uint16 (mm) or float (m) aligned-to-color depth image.
-    Erodes the mask and clips depth to median +- 3*MAD to drop edge bleed
-    onto the conveyor/background.
+    Erodes the mask and clips depth around the median to drop edge bleed
+    onto the conveyor/background. The clip half-width is 3*MAD, floored at
+    near_band toward the camera and far_band away from it (see below).
     """
     m = mask.astype(np.uint8)
     if erode_px > 0:
@@ -55,7 +57,21 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
 
     med = np.median(z)
     mad = np.median(np.abs(z - med)) + 1e-6
-    keep = np.abs(z - med) < 3.0 * 1.4826 * mad
+    # MAD 만으로 자르면 합성(Isaac) depth 에서 무너진다. 렌더면은 잡음이 없어
+    # MAD 가 0.015~0.020 mm 까지 떨어지고(실측 2026-08-19, 블록 7 개), 클립 폭이
+    # ±0.1 mm 가 되어 "중앙값 평면 하나만 남기는 필터"로 퇴화한다. 그러면 물체
+    # 자신의 단차가 통째로 잘린다 — 우측 블록의 30 mm 끝단이 점의 36~39 % 와
+    # 함께 사라져 길이가 200 -> 152 mm, 중심이 한쪽으로 24 mm(결손의 절반)
+    # 밀렸다. 실 RealSense 는 MAD 가 수 mm 라 이 경로로는 드러나지 않는다.
+    #
+    # 밴드를 비대칭으로 두는 것이 핵심이다. 클립이 막으려는 edge bleed(컨베이어·
+    # 배경)는 위에서 내려다보는 한 언제나 물체보다 *멀고*, 살려야 하는 물체의
+    # 단차는 *가깝다*. 대칭으로 넓히면 둘을 같이 들인다 — 우측 블록은 벨트가
+    # 본체면에서 +24 mm 뿐이라 ±40 mm 로 열면 벨트가 그대로 딸려 들어온다
+    # (실측: 두께 0 -> 41~56 mm, 길이 244 mm 까지 부풀었다).
+    # far_band 를 24 mm 보다 작게 유지하는 것이 이 씬의 상한이다.
+    half = 3.0 * 1.4826 * mad
+    keep = (z > med - max(half, near_band)) & (z < med + max(half, far_band))
     z, ys, xs = z[keep], ys[keep], xs[keep]
 
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
