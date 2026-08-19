@@ -15,7 +15,7 @@ try:
 except OSError:  # 폰트 없는 환경(미설치 컨테이너 등)에서는 기본 폰트로 동작
     _FONT = ImageFont.load_default(_FONT_PX)
 
-# 라벨 외곽선 두께. 폭 측정(_label_x)과 실제 렌더(draw.text)가 같은 값을
+# 라벨 외곽선 두께. 폭 측정(_extent)과 실제 렌더(draw.text)가 같은 값을
 # 봐야 하므로 상수로 묶는다 — 한쪽만 건드리면 딱 그만큼 다시 잘려 나간다.
 _STROKE = 2
 
@@ -57,7 +57,7 @@ _MAX_TIERS = 12
 
 
 def _extent(lines):
-    """라벨 블록의 (left, right). _label_x 와 같은 stroke 기준으로 잰다."""
+    """라벨 블록의 (left, right). 실제 렌더(draw.text)와 같은 stroke 기준으로 잰다."""
     boxes = [_MEASURE.textbbox((0, 0), s, font=_FONT, stroke_width=_STROKE)
              for s in lines]
     return min(b[0] for b in boxes), max(b[2] for b in boxes)
@@ -87,16 +87,16 @@ def _label_ys(box, n_lines, frame_h):
     """
     h = _LINE_H * n_lines
     step = h + 4
-    ys = []
-    top = int(box[1]) - 8 - h
-    while top >= 2 and len(ys) < _MAX_TIERS:
-        ys.append(top)
+    above, below = [], []      # 위/아래를 따로 센다 — 누적으로 세면 위가 꽉 찬
+    top = int(box[1]) - 8 - h  # 박스일수록 아래 후보가 줄어드는 비대칭이 생긴다
+    while top >= 2 and len(above) < _MAX_TIERS:
+        above.append(top)
         top -= step
-    n_above = len(ys)          # 아래쪽은 따로 센다 — 누적으로 세면 위가 꽉 찬
-    bot = int(box[3]) + 6      # 박스일수록 아래 후보가 줄어드는 비대칭이 생긴다
-    while bot + h <= frame_h - 2 and len(ys) - n_above < _MAX_TIERS:
-        ys.append(bot)
+    bot = int(box[3]) + 6
+    while bot + h <= frame_h - 2 and len(below) < _MAX_TIERS:
+        below.append(bot)
         bot += step
+    ys = above + below
     if not ys:                       # 프레임보다 라벨이 큰 극단
         ys.append(max(2, frame_h - h - 2))
     return ys
@@ -127,36 +127,15 @@ def _place_label(box, forms, placed, frame_w, frame_h):
         for y in _label_ys(box, len(lines), frame_h):
             rect = (x + left, y, x + right, y + _LINE_H * len(lines))
             n = _hits(rect, placed)
-            result = (x, y, lines, rect)
             if n == 0:
-                return result
+                return x, y, lines, rect
             # 동점이면 짧은 형식을 고른다. 어차피 겹칠 바에는 덮는 면적이
             # 작은 쪽이 아래 라벨을 덜 가린다 — 먼저 시도한 긴 형식이
             # 이기면 자리가 아무 데도 없을 때 화면이 가장 지저분해진다.
             key = (n, len(lines))
             if best is None or key < best[0]:
-                best = (key, result)
+                best = (key, (x, y, lines, rect))
     return best[1]
-
-
-def _label_x(x, lines, frame_w):
-    """라벨 x 위치 — 오른쪽으로 넘칠 만큼 왼쪽으로 당긴다.
-
-    라벨은 박스 왼쪽 x1 에서 시작해 그려지므로 물체가 화면 오른쪽에 있으면
-    글자가 그대로 잘려 나갔다 (실측 640x360: "blue plastic block#5 0.9" 에서
-    끝 자리가 사라지고 "whd=(0.161,0.057,0.0" 처럼 괄호가 안 닫힘).
-
-    폭은 textlength() 가 아니라 textbbox(stroke_width=) 로 잰다. 외곽선이
-    글자 좌우로 _STROKE 만큼 번져 나가는데 textlength 는 그걸 포함하지 않아
-    딱 그만큼 덜 당기게 된다. bbox 는 앵커 기준 상대 좌표라 left 가 보통
-    -_STROKE 로 음수다 — 그래서 왼쪽 여유도 이 값에서 그대로 얻는다.
-
-    한 물체의 줄들은 폭이 제각각이고(가장 긴 건 대개 d=/xyz= 줄, 241px)
-    전부 같은 x 를 공유하므로 최댓값으로 맞춰야 한 줄도 안 잘린다.
-    """
-    if not lines:
-        return x
-    return _clamp_x(x, *_extent(lines), frame_w)
 
 
 def draw_status(bgr, text):

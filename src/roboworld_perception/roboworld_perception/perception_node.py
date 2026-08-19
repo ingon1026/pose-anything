@@ -58,19 +58,13 @@ class PerceptionNode(Node):
         # 정상 동작 중에도 매번 DELETEALL 이 나가 마커가 통째로
         # 사라졌다 나타난다. 이것이 RViz 깜빡임의 주원인이다.
         self.declare_parameter("stale_timeout", 5.0)
-        # color 와 depth 는 서로 다른 틱에서 각각 따로 유실된다. 두 스트림이
-        # 30 Hz 로 나란히 올 때는 0.05 초로 충분하지만, Isaac 실시간 입력처럼
-        # 0.5 Hz / 0.3 Hz 로 띄엄띄엄 오면 짝이 거의 성립하지 않는다.
-        # 실측(2026-08-19, 40 초): color 19 장 / depth 11 장을 받고도
-        # slop=0.05 로는 동기화가 2 번밖에 안 붙었다. 가장 가까운 짝조차
-        # 0.0333 초로 아슬아슬했다. bag 재생은 촘촘하므로 기본값은 그대로 둔다.
+        # color/depth 짝짓기 창. 브리지가 정상이면 두 스트림이 같은 렌더 틱에서
+        # 나와 스탬프가 같으므로 0.05 로 100% 붙는다(2026-08-19 실측 3509/3509).
+        # 안 붙으면 slop 을 올리기 전에 브리지부터 볼 것 — 양쪽에 LARGE_DATA
+        # 전송 설정이 있는가. docs/bridge_contract.md 참고.
         self.declare_parameter("sync_slop", 0.05)
         self.declare_parameter("sync_queue_size", 5)
-        # 발행 점수 하한. 기본 0.0 = 끔 (저점수 2차 매칭은 의도된 설계).
-        # 계속 저점수인 허수 조각이 발행되는 것을 막는 임시 안전밸브 —
-        # 설계상 이 역할은 P_D(존재확률)가 맡기로 했으나 아직 미구현이다.
-        # 절대 임계라 가림 중 점수가 떨어지는 물체를 같이 자를 수 있으니
-        # 씬별로만 켤 것. 자세한 것은 Track.publishable 의 주석.
+        # 발행 점수 하한. 0.0 = 끔. 근거와 주의는 Track.publishable 의 주석.
         self.declare_parameter("publish_score_min", 0.0)
         # SAM3 입력 해상도. 0 = 기본 1008px.
         # Isaac Sim 과 GPU 를 나눠 쓰면 VRAM 이 부족해지고, 그러면 렌더프로덕트

@@ -8,15 +8,16 @@ import numpy as np
 import pytest
 
 from conftest import make_det, make_filtered_track
-from roboworld_perception.tracker import CONFIRM_N, IouTracker, Track
+from roboworld_perception.tracker import CONFIRM_N, IouTracker
 
 
-def _ready(t, score=None, now=10.0):
+def _ready(t, score=None):
     """publishable 의 나머지 조건(obb/confirmed/fresh)을 충족시킨다."""
     from roboworld_perception.geometry import ObbResult
     t.obb = ObbResult(center=np.zeros(3), extent=np.array([0.2, 0.1, 0.05]),
                       R=np.eye(3), num_points=100)
     t.n_accepted = CONFIRM_N
+    now = 10.0
     t.now = now
     t.last_accept_t = now
     if score is not None:

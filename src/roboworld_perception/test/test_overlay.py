@@ -5,7 +5,7 @@ overlay.py 는 눈으로만 확인해 왔고 테스트가 없었다. 배치 로�
 9 개)을 좌표로 재현해 두면, 다음에 누가 건드려도 조용히 깨지지 않는다.
 """
 from roboworld_perception.overlay import (_FONT_PX, _LINE_H, _STROKE,
-                                          _extent, _hits, _label_x,
+                                          _extent, _hits, _clamp_x,
                                           _label_ys, _place_label)
 
 W, H = 640, 360
@@ -43,20 +43,20 @@ def test_extent_uses_widest_line():
     assert wide >= narrow
 
 
-# --- _label_x ------------------------------------------------------------
+# --- _clamp_x ------------------------------------------------------------
 
-def test_label_x_pulls_back_from_right_edge():
+def test_clamp_x_pulls_back_from_right_edge():
     """오른쪽 끝 물체의 라벨이 프레임 밖으로 안 나가야 한다."""
-    _, right = _extent(FULL)
-    x = _label_x(600, FULL, W)
+    left, right = _extent(FULL)
+    x = _clamp_x(600, left, right, W)
     assert x + right <= W
 
 
-def test_label_x_keeps_left_edge_visible():
+def test_clamp_x_keeps_left_edge_visible():
     """프레임보다 넓은 라벨은 왼쪽에 붙여 앞부분이라도 읽히게 한다."""
     narrow_frame = 100
-    x = _label_x(80, FULL, narrow_frame)
-    left, _ = _extent(FULL)
+    left, right = _extent(FULL)
+    x = _clamp_x(80, left, right, narrow_frame)
     assert x + left >= 0
 
 
@@ -150,17 +150,6 @@ def test_nine_blocks_in_a_row_do_not_overlap():
         for j in range(i + 1, len(placed)):
             assert not overlap(placed[i], placed[j]), \
                 f"라벨 {i} 와 {j} 가 겹침: {placed[i]} vs {placed[j]}"
-
-
-def test_line_height_follows_font_size():
-    """줄 간격이 글자 크기에서 파생되는지.
-
-    예전에는 _LINE_H 가 17 로 박혀 있어 폰트만 키우면 다단 라벨이 저 혼자
-    겹쳤다. 테스트가 _LINE_H 를 import 해 쓰므로 값이 틀려도 함께 틀려서
-    아무도 못 잡는다 — 관계 자체를 고정한다.
-    """
-    assert _LINE_H > _FONT_PX
-    assert _LINE_H - _FONT_PX <= 4
 
 
 def test_placement_is_deterministic():

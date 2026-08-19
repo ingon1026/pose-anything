@@ -62,12 +62,12 @@ def read_bag(bag_path, max_frames=None, sync_slop=0.05):
                 return None
             dt, dimg = min(depths, key=lambda d: abs(d[0] - ct))
             if abs(dt - ct) > sync_slop * 1e9:  # 창 밖이면 짝 없음
-                # 50 ms 기본값은 두 스트림이 30 Hz 로 나란히 오는
-                # RealSense bag 기준이다. Isaac 실기동 bag 처럼 color 와
-                # depth 가 서로 다른 틱에서 따로 유실되면 짝이 거의 안 맞는다
-                # (실측 2026-08-19: isaac_belt bag 의 color 78 장 중 4 장만
-                # 처리됐다). 그때는 --sync-slop 을 올릴 것. 라이브 경로의
-                # sync_slop 파라미터(5f881d0)와 같은 문제다.
+                # 실측 2026-08-19: 브리지를 고치기 전에 녹화한 isaac_belt
+                # bag 은 color 78 장 중 4 장만 붙는다. 그런 bag 은
+                # --sync-slop 을 올릴 것. 라이브 경로와 같은 현상이지만
+                # 짝짓기 메커니즘은 다르다(여기는 최근접, 저기는
+                # ApproximateTimeSynchronizer) — 같은 값이라도 결과
+                # 프레임 집합은 다를 수 있다.
                 return None
             cmsg = reader.deserialize(craw, cconn.msgtype)
             rgb = img_to_np(cmsg)
@@ -134,6 +134,9 @@ def main():
                     help="프롬프트당 유지할 인스턴스 수 (0=제한 없음)")
     ap.add_argument("--image-size", type=int, default=0,
                     help="SAM3 입력 해상도 (0=기본 1008)")
+    ap.add_argument("--publish-score-min", type=float, default=0.0,
+                    help="발행 점수 하한(0=끔). Isaac 프리셋은 0.6 을 쓴다 — "
+                         "그 정책을 bag 으로 재현하려면 같은 값을 줄 것")
     ap.add_argument("--detect-interval", type=int, default=5,
                     help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
     ap.add_argument("--raw", action="store_true",
@@ -155,7 +158,8 @@ def main():
     pipeline = PerceptionPipeline(
         Sam3Detector(threshold=args.threshold, image_size=args.image_size),
         detect_interval=args.detect_interval,
-        max_per_prompt=args.max_per_prompt)
+        max_per_prompt=args.max_per_prompt,
+        pub_score_min=args.publish_score_min)
 
     writer = None
     rows = []
