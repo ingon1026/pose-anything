@@ -325,7 +325,50 @@ ros2 topic info /camera/camera/color/camera_info --verbose --no-daemon | grep "P
 "토픽이 안 나온다" 로 보인다. 저속(0.2 Hz)에서는 창이 안 차 아무것도 못 내므로
 직접 세는 편이 낫다.
 
-### `.bashrc` 가 RMW 를 두 번 export 한다 (미수정)
+### 씬이 없는 스크립트를 참조한다 — twin_sync (2026-08-19 정리)
+
+씬을 열고 재생하면 매번 났던 에러:
+
+```
+[Error] [omni.graph.core.plugin] /conveyor/ConveyorBeltGraph/script_node:
+  Could not open/read the script at '...	win_sync_roboOke.py': ERROR_NOT_FOUND
+```
+
+파일은 이 머신 어디에도 없다(Desktop, isaacsim 저장소, ~/roboworld, git
+히스토리 전부 검색). `.collect.mapping.json` 에 `.py` 항목이 하나도 없는 것으로
+보아 USD Collect 가 애초에 script_node 의 스크립트 파일을 수집 대상으로
+보지 않는다.
+
+**기능 손실은 없다.** 이 노드의 `inputs:script`(인라인)는 ScriptNode 기본
+템플릿 그대로다(setup/cleanup 은 pass, compute 는 return True). 실제 트윈
+동기화는 같은 그래프의 `script_node_01` 이 인라인 6.5 KB 코드로 이미 하고
+있다 — 실물 셀의 `objects_live.json` 을 폴링해 블록 9 개의 포즈를 USD 에
+반영하고, 쥐고 있으면 물리 비활성 / 놓으면 활성으로 전환하는 상태기계다.
+재생하면 로그에 `[rb5 mirror] 파일 브리지 구동` 이 찍히는 것이 이것이다.
+
+**조치: `inputs:usePath` 를 False 로 껐다.** 프림을 지우지 않은 것은
+`script_node.outputs:execOut` 이 `print_text.inputs:execIn` 에 연결돼 있어서다
+(벨트 속도 HUD 출력). 지우면 그 배선까지 끊긴다.
+
+override 는 **루트 오버레이(`RoboWorld_cellomni.usdc`, 7 KB)에만** 넣었다.
+프림 자체는 49 MB 서브레이어(`RoboWorld.usdc`)에 있는데 거기는 안 건드렸다.
+되돌리려면 오버레이의 override 만 지우면 된다.
+백업: `RoboWorld_cellomni.usdc.bak-20260819`.
+
+**저장할 때 반드시 확인할 것 — 루트 레이어에 `/ROS2_Camera` 가 없어야 한다.**
+`cellomni_ros2_rebuild.py` 가 만드는 그래프는 런타임 산물이라 씬에 저장되면
+안 된다. 저장되면 다음에 열 때마다 퍼블리셔가 중복돼 K 가 옛 값으로 섞인다
+(§8 「해상도 바꾸기」참고). 이번 편집 스크립트는 저장 전에 이걸 assert 로
+막았다.
+
+결과: 씬 로드 후 `[Error]` 2 건 → 1 건. 남은 하나는 재생성 스크립트가 없는
+그래프를 지우려 시도하는 것으로, 스크립트가 잡아서 무시한다.
+
+곁다리로 경고가 하나 더 있다(에러 아님): `RoboWorld.usdc` 가
+`UnitsAdjust-...metricsAssembler` 서브레이어를 참조하는데 그 파일도 없다.
+같은 Collect 누락으로 보인다. 아직 손대지 않았다.
+
+### `.bashrc` 가 RMW 를 두 번 export 했다 (2026-08-19 정리)
 
 `~/.bashrc` 가 같은 변수를 여섯 줄 간격으로 두 번 설정한다. **나중 것이 이긴다.**
 
@@ -350,9 +393,14 @@ bash -lc 'echo "login: $RMW_IMPLEMENTATION"'       # 비어 있음 -> fastrtps
 bash -ic 'echo "interactive: $RMW_IMPLEMENTATION"' # rmw_cyclonedds_cpp
 ```
 
-**아직 안 고쳤다.** 어느 줄을 지울지는 이 머신의 다른 노드들이 어느 RMW 를
-전제하는지 확인한 뒤에 정한다. 고치기 전까지는 Isaac 과 붙일 셸에서
-`export RMW_IMPLEMENTATION=rmw_fastrtps_cpp` 를 손으로 다시 걸 것.
+**2026-08-19 정리했다.** 140 줄의 cyclonedds export 를 주석 처리해서
+134 줄의 fastrtps 가 살아나게 했다. 지우지 않고 주석으로 남긴 것은 rtab /
+turtlebot4 쪽이 cyclonedds 를 쓸 수 있어서다 — 필요하면 그 셸에서만 켠다.
+백업은 `~/.bashrc.bak-20260819`. 확인:
+
+```bash
+bash -ic 'echo $RMW_IMPLEMENTATION'   # rmw_fastrtps_cpp
+```
 
 ---
 
@@ -479,9 +527,39 @@ Isaac 의 VRAM 은 **3,383 MiB** 였다. 같은 씬을 깨끗하게 재시작한
 
 ### 남은 것
 
-- [ ] SAM3 를 다른 머신으로 분리 — 2.3 GB 를 통째로 뺄 수 있으나 네트워크
-      경유 지연이 붙는다. 지금 발행률이 0.5 Hz 라 감당 가능한지 재봐야 한다.
-- [ ] `~/.bashrc` 의 `RMW_IMPLEMENTATION` 중복 export 정리 (134 줄 fastrtps /
-      140 줄 cyclonedds, 뒤엣것이 이긴다). Windows 쪽이 fastrtps 고정이라
-      터미널에서 직접 띄우면 DDS 가 안 붙는다. 비대화형 셸에서는 안 드러나므로
-      스크립트 검증만으로는 못 잡는다 (§8).
+- [x] SAM3 를 다른 머신으로 분리 — **검토 결과 하지 않는다** (아래).
+
+### SAM3 원격 분리는 하지 않는다 (2026-08-19 검토)
+
+지연은 문제가 아니었다. 유선 GigE 기준 왕복 12~15 ms 로 주기 2 초의 1% 미만,
+Wi-Fi 라도 5% 미만이다. 원래 질문("0.5 Hz 라 감당 가능한가")의 답은
+여유롭게 그렇다. **그런데도 권하지 않는 이유가 넷이다.**
+
+1. **고칠 증상이 없다.** 이 구성은 CUDA 에러 0 건으로 안정적이다. 문제는
+   절대 사용량이 아니라 재할당 여유였고 `image_size=672` 가 이미 해결했다.
+2. **얻는 것이 VRAM 이 아니라 GPU 시간이다.** 그리고 그 천장이 2.5 Hz 다
+   (8/13 A/B: 인식 켬 0.70 / 끔 2.55 Hz). 진짜 병목은 Isaac 의 이미지 반출
+   경로이고 로그에 근거가 있다 — `OgnSdPostRenderVarToHost: rendervar copy
+   from texture directly to host buffer is counter-performant`.
+   **SAM3 를 떼도 5 배에서 멈춘다.**
+3. **같은 이득을 bag 녹화 + `scripts/run_offline.py` 로 하드웨어 0 원에 얻는다.**
+   GPU 경쟁이 0 이 되고, 같은 데이터로 파라미터를 반복 비교할 수 있어
+   정확도 검증에는 오히려 낫다. 이건 8/13 문서에 이미 적혀 있던 답이다.
+4. **두 번째 GPU 머신의 존재를 확인하지 못했다.** 없다면 이 항목의 실제
+   비용은 코드가 아니라 하드웨어 구매다.
+
+그럼에도 **실시간** 관측이 요구사항이 되고 두 번째 머신이 실제로 있다면,
+`Sam3Detector.detect()` 경계만 원격 스텁으로 갈아끼우는 안이 맞다.
+그때 반드시 지킬 것:
+
+- WSL 이 **outbound 클라이언트**여야 한다. WSL2 는 NAT 뒤라 원격이 WSL 로
+  먼저 접속하는 구조(ROS 토픽 경유)는 성립하지 않는다. 미러 네트워킹으로
+  우회하려는 순간 이미 기록된 DDS discovery 함정에 그대로 들어간다.
+- color 는 **원본 640x360 그대로** 보낸다. 672 로 리사이즈해서 보내면
+  1,354,752 B 로 원본 691,200 B 의 1.96 배다.
+- **명시 타임아웃을 `stale_timeout` 보다 짧게.** HTTP 기본 타임아웃은 무한이라
+  원격이 물리면 `_busy` 가 영구 True 가 되어 노드가 살아있는 채로 아무것도
+  안 한다. §1 의 "토픽은 보이는데 이미지만 없다" 와 같은 침묵형 고장이다.
+- 스텁에 **`.threshold` 속성을 노출**할 것. `pipeline.py` 가
+  `getattr(detector, "threshold", None)` 로 트래커에 넘기는데, 없으면 조용히
+  None 이 되어 매칭 동작이 바뀐다.
