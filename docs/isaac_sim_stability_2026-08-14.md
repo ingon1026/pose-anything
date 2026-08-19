@@ -467,6 +467,45 @@ WSL 기본 `rmem_max` 는 **212992 (208 KB)** 다. `sockets_size=1MB` 를 주면
 `--arg` 스코프, `frameSkipCount`)은 전부 **조용히 무시**되는 종류인데,
 이것만은 요란하게 실패해서 원인을 즉시 알려준다.
 
+### 함정: `.bashrc` 만으로는 부족하다 — 양쪽 프로세스 전부에 필요하다
+
+`FASTDDS_BUILTIN_TRANSPORTS` 는 **참가자를 만드는 모든 프로세스**에 있어야 한다.
+`~/.bashrc` 에 넣어 뒀지만 그건 **대화형 셸에서만** 읽힌다. 스크립트,
+`wsl -e bash -lc`, launch 파일, systemd 등으로 뜬 프로세스는 못 받는다.
+
+한쪽만 설정되면 이렇게 된다:
+
+    Isaac (Windows)          TCP
+    perception / rviz2 (WSL) UDP   <- .bashrc 를 안 읽은 경로로 뜸
+    -> 서로 아예 안 붙는다
+
+실측 2026-08-19: 이 상태로 rviz2 와 perception 을 띄웠더니 토픽이
+`/rosout` 만 남았다. Isaac 은 멀쩡히 재생 중이고 `/ROS2_Camera` 도 살아 있었다.
+
+확인 방법:
+
+```bash
+tr ' ' '
+' < /proc/$(pgrep -f perception_node)/environ | grep FASTDDS
+```
+
+비어 있으면 그 프로세스는 UDP 를 쓰고 있다. launch 파일이나 기동 스크립트에
+직접 `export` 하는 것이 확실하다.
+
+### 함정: `ros2 topic list --no-daemon` 이 거짓으로 빈 목록을 준다
+
+TCP 로 바꾼 뒤 `--no-daemon` 목록이 `/parameter_events`, `/rosout` 만 보여준다.
+새 참가자가 디스커버리를 끝내기 전에 타임아웃되는 것으로 보인다.
+
+**데이터는 멀쩡히 흐른다.** 같은 시점에 실측:
+
+    ros2 topic list --no-daemon      -> /rosout 뿐
+    ros2 topic hz /perception/detections -> 4.0 Hz
+    직접 구독                          -> 89 사이클 622 검출, 블록 7 개 안정 추적
+
+**"토픽이 없다" 로 보이면 `topic hz` 나 직접 구독으로 다시 확인할 것.**
+목록만 보고 "브리지가 죽었다" 고 판단하면 없는 문제를 쫓게 된다.
+
 ### 같이 넣은 것: 이미지 발행 큐 제거
 
 ```
