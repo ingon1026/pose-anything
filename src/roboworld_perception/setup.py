@@ -15,6 +15,7 @@ setup(
         ("share/" + package_name + "/rviz", ["rviz/perception.rviz"]),
     ],
     install_requires=["setuptools"],
+    tests_require=["pytest"],
     zip_safe=True,
     maintainer="ingon",
     maintainer_email="157796083+ingon1026@users.noreply.github.com",
