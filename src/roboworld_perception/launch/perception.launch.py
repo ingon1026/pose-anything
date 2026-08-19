@@ -22,6 +22,7 @@ def generate_launch_description():
         DeclareLaunchArgument("stale_timeout", default_value="5.0"),
         DeclareLaunchArgument("sync_slop", default_value="0.05"),
         DeclareLaunchArgument("sync_queue_size", default_value="5"),
+        DeclareLaunchArgument("publish_score_min", default_value="0.0"),
         DeclareLaunchArgument("image_size", default_value="0"),
         # Isaac Sim 이 이미지를 직접 발행하면 RealSense 드라이버가 없어
         # camera_link -> camera_color_optical_frame 이 비므로 여기서 켠다.
@@ -61,6 +62,8 @@ def generate_launch_description():
                     LaunchConfiguration("sync_slop"), value_type=float),
                 "sync_queue_size": ParameterValue(
                     LaunchConfiguration("sync_queue_size"), value_type=int),
+                "publish_score_min": ParameterValue(
+                    LaunchConfiguration("publish_score_min"), value_type=float),
                 "image_size": ParameterValue(
                     LaunchConfiguration("image_size"), value_type=int),
                 "publish_optical_tf": ParameterValue(

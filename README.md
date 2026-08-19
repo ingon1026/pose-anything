@@ -187,9 +187,22 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
 
-**Parameters** — `prompts`, `score_threshold` (0.4), `detect_interval` (5, SAM keyframe period),
+**Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
 `publish_world_tf` (true — camera-above-belt TF for RViz; disable when integrating a real robot TF tree)
+
+`score_threshold` (0.4) is **not** a publish threshold. The detector itself
+returns everything above `min(0.1, score_threshold)`; the value only decides
+which detections are strong enough to *start a new track* (and which go to the
+ByteTrack low-score second pass). A track that is kept alive by low-score
+observations keeps publishing, and its `score` field follows those low
+observations down — that is deliberate, since low-score matches are what carry
+a track through partial occlusion.
+
+`publish_score_min` (0.0 = off) is the actual publish gate, for scenes where
+persistent low-score fragments would otherwise reach a consumer. It is an
+absolute threshold, so a track sitting near the value flickers in and out —
+set it well below the scores you expect. `launch/isaac.launch.py` sets 0.4.
 
 What a consumer actually receives (captured from a real run — note the per-axis
 position variance filled in by the fusion filter, ready for confidence-gated grasping):

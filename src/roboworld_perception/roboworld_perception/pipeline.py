@@ -108,14 +108,15 @@ def _touches_border(mask):
 class PerceptionPipeline:
     def __init__(self, detector, depth_scale=0.001, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
-                 max_per_prompt=1):
+                 max_per_prompt=1, pub_score_min=0.0):
         self.detector = detector
         self.depth_scale = depth_scale
         self.rot_alpha = rot_alpha
         # "라벨당 트랙 수" 제한은 트래커의 새 트랙 생성에서만 건다
         # (검출 단계에서 자르면 score 역전 시 ID가 끊김)
         self.tracker = IouTracker(iou_threshold, max_missed,
-                                  max_per_label=max_per_prompt)
+                                  max_per_label=max_per_prompt,
+                                  pub_score_min=pub_score_min)
         self.detect_interval = max(1, detect_interval)
         self._frame_idx = 0
         self._prev_gray = None

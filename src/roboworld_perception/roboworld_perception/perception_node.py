@@ -66,6 +66,12 @@ class PerceptionNode(Node):
         # 0.0333 초로 아슬아슬했다. bag 재생은 촘촘하므로 기본값은 그대로 둔다.
         self.declare_parameter("sync_slop", 0.05)
         self.declare_parameter("sync_queue_size", 5)
+        # 발행 점수 하한. 기본 0.0 = 끔 (저점수 2차 매칭은 의도된 설계).
+        # 계속 저점수인 허수 조각이 발행되는 것을 막는 임시 안전밸브 —
+        # 설계상 이 역할은 P_D(존재확률)가 맡기로 했으나 아직 미구현이다.
+        # 절대 임계라 가림 중 점수가 떨어지는 물체를 같이 자를 수 있으니
+        # 씬별로만 켤 것. 자세한 것은 Track.publishable 의 주석.
+        self.declare_parameter("publish_score_min", 0.0)
         # SAM3 입력 해상도. 0 = 기본 1008px.
         # Isaac Sim 과 GPU 를 나눠 쓰면 VRAM 이 부족해지고, 그러면 렌더프로덕트
         # 텍스처가 재할당되면서 ROS2 발행 노드가 들고 있던 CUDA 핸들이 무효가
@@ -149,7 +155,8 @@ class PerceptionNode(Node):
             Sam3Detector(threshold=threshold,
                          image_size=self.get_parameter("image_size").value),
             detect_interval=self.get_parameter("detect_interval").value,
-            max_per_prompt=self.get_parameter("max_per_prompt").value)
+            max_per_prompt=self.get_parameter("max_per_prompt").value,
+            pub_score_min=self.get_parameter("publish_score_min").value)
         # run.sh가 이 문자열을 grep으로 대기한다 — 문구 변경 시 run.sh도 수정
         self.get_logger().info("SAM3 ready")
 

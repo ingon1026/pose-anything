@@ -72,6 +72,7 @@ class Track:
     n_accepted: int = 0        # 수락된 pose 관측 수 (M-of-N 승격용)
     last_accept_t: float | None = None  # 마지막 수락 시각 (신선도)
     now: float = 0.0           # 파이프라인이 매 프레임 주입하는 현재 시각
+    pub_score_min: float = 0.0  # 발행 하한 (0=끔). 아래 publishable 참고
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
 
     @property
@@ -91,9 +92,25 @@ class Track:
 
     @property
     def publishable(self):
-        """소비자(토픽·CSV)가 이 트랙의 pose를 내보내도 되는가."""
+        """소비자(토픽·CSV)가 이 트랙의 pose를 내보내도 되는가.
+
+        pub_score_min 은 기본 0.0(끔)이다. 저점수 관측이 트랙을 살리고
+        pose를 갱신하는 것 자체는 의도된 설계이므로(docs/fusion_design_2026-08.md,
+        test_occlusion.py의 저점수 2차 매칭 회귀) 여기를 기본으로 막으면 안 된다.
+
+        다만 계속 저점수인 허수 조각(물체의 1/4 크기)이 발행까지 가는 경로가
+        열려 있다. 조각의 기하는 자기 자신과 일관되므로 융합 필터의 χ² 게이트를
+        통과한다 — 안정적인 가짜는 안정적이라서 통과한다. 설계상 이걸 막기로 한
+        것은 존재확률 P_D 인데 아직 미구현이다(설계 문서 P2). 그때까지 쓰는
+        임시 안전밸브다.
+
+        절대 임계라 부분 가림에 취약하다. datasets.md 실측으로 가림 중 점수가
+        자기 baseline 의 50%까지 떨어지므로, 프롬프트가 약한 물체에 켜면 진짜
+        물체의 발행이 끊긴다. 그래서 기본은 끄고 씬별로만 켠다.
+        """
         return (self.obb is not None and self.filter is not None
                 and not self.frozen and self.confirmed and self.fresh
+                and self.score >= self.pub_score_min
                 and float(self.filter.pos_std.max()) <= PUB_POS_STD_MAX)
 
     # ── association이 호출하는 상태 전이 ──────────────────
@@ -159,7 +176,7 @@ class Track:
 
 class IouTracker:
     def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0,
-                 occlusion_hold=12, rescue_buffer=2.5):
+                 occlusion_hold=12, rescue_buffer=2.5, pub_score_min=0.0):
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
         # 가림 대응: missed가 max_missed를 넘으면 삭제 대신 "동결" —
@@ -174,6 +191,8 @@ class IouTracker:
         # rescue 매칭 범위 — 박스를 이 배율로 확장한 buffered IoU가 겹쳐야
         # 복귀 허용 (C-BIoU). 무제한 최근접의 원거리 오매칭을 막는다.
         self.rescue_buffer = rescue_buffer
+        # 트랙 생성 시 각 Track 에 그대로 넘긴다 (Track.publishable 참고)
+        self.pub_score_min = pub_score_min
         self.tracks: list[Track] = []
         self._next_id = 1
 
@@ -256,7 +275,7 @@ class IouTracker:
             if self.max_per_label > 0 and alive >= self.max_per_label:
                 continue
             t = Track(self._next_id, d["label"], np.asarray(d["box"], dtype=float),
-                      d["score"])
+                      d["score"], pub_score_min=self.pub_score_min)
             self._next_id += 1
             self.tracks.append(t)
             pairs.append((t, d))
