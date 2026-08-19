@@ -58,6 +58,14 @@ class PerceptionNode(Node):
         # 정상 동작 중에도 매번 DELETEALL 이 나가 마커가 통째로
         # 사라졌다 나타난다. 이것이 RViz 깜빡임의 주원인이다.
         self.declare_parameter("stale_timeout", 5.0)
+        # color 와 depth 는 서로 다른 틱에서 각각 따로 유실된다. 두 스트림이
+        # 30 Hz 로 나란히 올 때는 0.05 초로 충분하지만, Isaac 실시간 입력처럼
+        # 0.5 Hz / 0.3 Hz 로 띄엄띄엄 오면 짝이 거의 성립하지 않는다.
+        # 실측(2026-08-19, 40 초): color 19 장 / depth 11 장을 받고도
+        # slop=0.05 로는 동기화가 2 번밖에 안 붙었다. 가장 가까운 짝조차
+        # 0.0333 초로 아슬아슬했다. bag 재생은 촘촘하므로 기본값은 그대로 둔다.
+        self.declare_parameter("sync_slop", 0.05)
+        self.declare_parameter("sync_queue_size", 5)
         # SAM3 입력 해상도. 0 = 기본 1008px.
         # Isaac Sim 과 GPU 를 나눠 쓰면 VRAM 이 부족해지고, 그러면 렌더프로덕트
         # 텍스처가 재할당되면서 ROS2 발행 노드가 들고 있던 CUDA 핸들이 무효가
@@ -172,7 +180,8 @@ class PerceptionNode(Node):
         sync = ApproximateTimeSynchronizer(
             [Subscriber(self, Image, self.get_parameter("color_topic").value),
              Subscriber(self, Image, self.get_parameter("depth_topic").value)],
-            queue_size=5, slop=0.05)
+            queue_size=self.get_parameter("sync_queue_size").value,
+            slop=self.get_parameter("sync_slop").value)
         sync.registerCallback(self.on_frames)
 
         self.csv_writer = None

@@ -33,6 +33,14 @@ _PRESET = [
     # 실측: CUDA 에러 37,151 회 뒤 [omni.rtx] GPU crash, Isaac SIGSEGV.
     # 영상만 볼 거면 grab_debug.py 쪽이 안전하다.
     ("rviz", "false"),
+    # color 와 depth 가 서로 다른 틱에서 따로 유실돼 스탬프가 거의 안 겹친다.
+    # 실측(2026-08-19, 40 초): color 19 / depth 11 을 받고도 slop=0.05 로는
+    # 동기화가 2 번뿐이었다. Isaac 입력 주기(2 초)의 절반이면 짝이 안정적으로
+    # 붙으면서도 서로 다른 순간의 프레임을 잘못 묶을 위험은 낮다.
+    ("sync_slop", "1.0"),
+    # 두 스트림의 발행률이 다르면(color 0.5 Hz / depth 0.3 Hz) 느린 쪽을
+    # 기다리는 동안 빠른 쪽 큐가 밀려난다.
+    ("sync_queue_size", "30"),
 ]
 
 def generate_launch_description():
