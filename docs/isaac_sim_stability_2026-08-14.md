@@ -101,9 +101,89 @@ Isaac 로그의 `[Error]` 를 먼저 grep 하면 5 분 만에 끝난다.
 grep -c cudaErrorInvalidResourceHandle "$(ls -t ~/.nvidia-omniverse/logs/Kit/Isaac-Sim\ Full/6.0/kit_*.log | head -1)"
 ```
 
+**단, 반대 함정도 있다.** 이미지가 두 개 다 흐르는데 검출만 0 이면 GPU 가
+아니라 동기화기다 (§3). 8/19 에 여기서 반나절을 썼다.
+
 ---
 
-## 3. TF 사슬이 끊겨 RViz 에 마커가 안 보인다
+## 3. 검출이 하나도 안 나온다 — 동기화 slop ← 8/19 의 본체
+
+### 증상
+
+- `perception_node` 가 `입력 없음 5.0초 — 마커 정리` 만 반복한다.
+- `ros2 topic list` 에 color/depth/`camera_info` 가 다 보이고 `camera_info` 도
+  정상이다. 이미지도 실제로 흐른다.
+- 그런데 검출은 **0 개**. 콜백이 아예 안 불린다.
+
+### 진짜 원인
+
+`perception_node.py` 가 두 이미지를 묶는 동기화기를 하드코딩하고 있었다.
+
+```python
+ApproximateTimeSynchronizer(..., queue_size=5, slop=0.05)
+```
+
+color 와 depth 는 **서로 다른 틱에서 각각 따로 유실된다.** 발행률이 낮으면
+살아남은 프레임끼리 스탬프가 50 ms 안에 겹칠 일이 거의 없다. 두 스트림이
+다 살아 있어도 짝이 안 붙으면 콜백은 한 번도 안 불린다.
+
+실측 (2026-08-19, 40 초):
+
+| 항목 | 값 |
+|---|---|
+| color 수신 | 19 장 |
+| depth 수신 | 11 장 |
+| 동기화 성공 | **2 회** |
+| 가장 가까운 짝의 시간차 | 0.0333 초 (임계 0.05 초에 아슬아슬) |
+
+서른 장을 받고 두 번 붙었다. `slop=0.05` 는 두 스트림이 30 Hz 로 나란히 오는
+**bag 재생 기준값**이지 실시간 Isaac 기준값이 아니다.
+
+### 조치 — `sync_slop` / `sync_queue_size` 파라미터화 (`5f881d0`)
+
+**기본값은 0.05 / 5 그대로 둔다.** bag 재생은 촘촘해서 문제가 없고, slop 을
+무턱대고 넓히면 서로 다른 순간의 프레임을 잘못 묶는다. Isaac 프리셋
+(`isaac.launch.py`)에서만 올렸다.
+
+| 파라미터 | 기본 | Isaac 프리셋 |
+|---|---|---|
+| `sync_slop` | 0.05 | **1.0** |
+| `sync_queue_size` | 5 | **30** |
+
+1.0 초는 Isaac 입력 주기(2 초)의 절반이다. 짝은 안정적으로 붙으면서 다른
+순간을 묶을 위험은 낮은 지점으로 골랐다. `queue_size` 는 두 스트림의 발행률이
+다를 때(color 0.5 Hz / depth 0.3 Hz) 느린 쪽을 기다리는 동안 빠른 쪽 큐가
+밀려나는 것을 막는다.
+
+수정 후 실기동:
+
+| 항목 | 값 |
+|---|---|
+| `/perception/detections` | 0.78 Hz |
+| `/perception/debug_image` | 0.61 Hz |
+| 검출 score | 0.945 |
+| pose z | 0.945 m |
+| 크기 | 0.194 x 0.049 m |
+| RViz2 마커 | 정상 |
+| Kit CUDA 에러 | 0 건 |
+
+### 이것이 "안정 구성" 이 실기동에서 안 돌던 이유다
+
+이 문서가 8/18 에 안정 구성이라고 적어 둔 `isaac.launch.py` 프리셋은, 그대로
+띄우면 검출이 하나도 안 나왔다. VRAM 도 CUDA 에러도 아니고 동기화기였다.
+안정 구성이라는 표시는 "CUDA 에러가 안 난다" 까지만 보증한 것이었다.
+
+**교훈: "토픽은 흐르는데 입력 없음" 이 나오면 VRAM 을 의심하기 전에
+동기화기를 직접 붙여서 짝이 붙는지부터 재라.**
+
+재현 — 같은 `ApproximateTimeSynchronizer(queue_size=5, slop=0.05)` 를 붙인
+작은 노드로 color/depth 스탬프를 모아, 수신 장수와 최근접 짝의 시간차를 찍어
+보면 된다. **5 분이면 판정된다.** 장수는 도는데 시간차가 slop 보다 크게
+나오면 그게 전부다.
+
+---
+
+## 4. TF 사슬이 끊겨 RViz 에 마커가 안 보인다
 
 ### 원인
 
@@ -143,7 +223,7 @@ frame 이름을 실어 보내면 이 링크는 붙지 않는다.
 
 ---
 
-## 4. launch 인자가 조용히 무시된다 ← 함정
+## 5. launch 인자가 조용히 무시된다 ← 함정
 
 노드가 `declare_parameter` 로 갖고 있어도, `perception.launch.py` 의
 `parameters=[{...}]` 에 넣지 않으면 **launch 인자로 줘도 무시되고 노드
@@ -160,6 +240,8 @@ frame 이름을 실어 보내면 이 링크는 붙지 않는다.
 | `max_per_prompt` | 1 | 같은 물체 여러 개면 반드시 올릴 것 |
 | `detect_interval` | 5 | 입력이 느리면 낮춰야 트랙이 선다 (아래) |
 | `stale_timeout` | 5.0 | 마커 잔상 정리 임계값 |
+| `sync_slop` | 0.05 | 입력이 느리면 반드시 올릴 것 (§3) |
+| `sync_queue_size` | 5 | 두 스트림 발행률이 다르면 올릴 것 (§3) |
 | `image_size` | 0 | 0 = SAM3 기본 1008px |
 | `publish_optical_tf` | false | Isaac 구성은 true |
 
@@ -171,7 +253,7 @@ ros2 param get /roboworld_perception max_per_prompt
 
 ---
 
-## 5. RViz 마커 깜빡임
+## 6. RViz 마커 깜빡임
 
 원인이 둘이었다.
 
@@ -185,7 +267,7 @@ ros2 param get /roboworld_perception max_per_prompt
 
 ---
 
-## 6. 라벨이 안 읽힌다 (2 건)
+## 7. 라벨이 안 읽힌다 (2 건)
 
 **가로 잘림** — 라벨은 박스 왼쪽 x 에서 시작해 그려지는데 경계 처리가 없어
 `whd=(0.161,0.057,0.0` 처럼 중간에서 끊겼다. `_label_x` 로 가장 넓은 줄 기준
@@ -201,7 +283,7 @@ ros2 param get /roboworld_perception max_per_prompt
 
 ---
 
-## 7. 운영 규칙 (밟으면 시간 날림)
+## 8. 운영 규칙 (밟으면 시간 날림)
 
 ### `stop → play` 를 쓰지 말 것
 
@@ -217,6 +299,8 @@ SDG 파이프라인 전체를 해제했다 재구성하느라 **메인 스레드
 `stop→play` 나 `cellomni_ros2_rebuild.py` 는 ROS2 퍼블리셔를 **파괴하고 새로
 만든다.** 그 전에 떠 있던 구독자는 재매칭되지 않는다. 증상은 "토픽은 보이는데
 perception 은 입력 없음" 이다. 새로 만든 구독자는 잘 받으므로 진단이 헷갈린다.
+또한 같은 문구가 동기화 slop 때문에도 나온다 — perception 을 새로 띄워도
+그대로면 §3 을 볼 것.
 
 ### 해상도 변경은 세션당 한 번만
 
@@ -241,9 +325,38 @@ ros2 topic info /camera/camera/color/camera_info --verbose --no-daemon | grep "P
 "토픽이 안 나온다" 로 보인다. 저속(0.2 Hz)에서는 창이 안 차 아무것도 못 내므로
 직접 세는 편이 낫다.
 
+### `.bashrc` 가 RMW 를 두 번 export 한다 (미수정)
+
+`~/.bashrc` 가 같은 변수를 여섯 줄 간격으로 두 번 설정한다. **나중 것이 이긴다.**
+
+```
+134:export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+140:export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+그래서 터미널을 열어 손으로 띄운 노드는 전부 `rmw_cyclonedds_cpp` 다. 반면
+Windows 쪽(`cellomni 실행.bat`)은 `rmw_fastrtps_cpp` 고정이다
+([2026-08-13 §4.2](isaac_sim_connection_2026-08-13.md)). **RMW 가 다르면
+DDS 가 서로를 아예 못 본다.**
+
+오늘 검증에 안 걸린 이유가 있다. `wsl -e bash -lc` 같은 **비대화형 셸은
+`.bashrc` 를 읽지 않아서** 변수가 비고, ROS 2 기본값인 `rmw_fastrtps_cpp` 로
+뜬다. 즉 **스크립트로 돌리면 붙고, 사용자가 터미널에서 직접 띄우면 안 붙는다.**
+같은 명령인데 결과가 달라서 원인 찾기가 나쁘다.
+
+```bash
+grep -n RMW_IMPLEMENTATION ~/.bashrc
+bash -lc 'echo "login: $RMW_IMPLEMENTATION"'       # 비어 있음 -> fastrtps
+bash -ic 'echo "interactive: $RMW_IMPLEMENTATION"' # rmw_cyclonedds_cpp
+```
+
+**아직 안 고쳤다.** 어느 줄을 지울지는 이 머신의 다른 노드들이 어느 RMW 를
+전제하는지 확인한 뒤에 정한다. 고치기 전까지는 Isaac 과 붙일 셸에서
+`export RMW_IMPLEMENTATION=rmw_fastrtps_cpp` 를 손으로 다시 걸 것.
+
 ---
 
-## 8. 실측 성능 (참고)
+## 9. 실측 성능 (참고)
 
 640x360 기준, 카메라 → WSL 수신률:
 
@@ -270,7 +383,7 @@ depth 의 구조적 한계다.
 
 ---
 
-## 9. 다음 세션에서 할 것
+## 10. 다음 세션에서 할 것
 
 2026-08-18 에 아래 다섯 개를 처리했다.
 
@@ -340,7 +453,35 @@ depth 의 구조적 한계다.
 - `vp.resolution` 은 즉시 바뀌지만 USD 렌더프로덕트는 **몇 프레임 뒤에**
   따라온다. 설정 직후 재면 텍스처는 아직 옛 크기다.
 
+### 해상도를 바꾸면 그 세션에 VRAM 이 쌓인다 (2026-08-19 실측)
+
+위 A/B 를 재느라 한 세션에서 뷰포트 해상도를 **12 회 넘게** 바꿨다. 다 재고 난
+Isaac 의 VRAM 은 **3,383 MiB** 였다. 같은 씬을 깨끗하게 재시작한 뒤 다시 재니
+**2,470 MiB** 였다.
+
+| 단계 | MiB |
+|---|---:|
+| 기준선 (Isaac 꺼짐) | 4,874 |
+| 빈 스테이지 | 6,501 |
+| 씬 로드 | 7,344 |
+| → Isaac 몫 | **2,470** |
+
+이 2,470 MiB 는 8/18 실측 2,641 MiB 와 사실상 같다. 즉 해상도를 주무른 세션
+쪽이 **약 900 MiB 를 더 물고 있었다.** RTX 가 옛 해상도의 텍스처를 즉시
+반납하지 않기 때문이다. (기준선이 위 절의 5,059 MiB 와 다른 것은 Isaac 밖의
+다른 앱 사용량 차이다.)
+
+운영 규칙의 「해상도 변경은 세션당 한 번만」이 K 행렬 때문만은 아니라는 뜻이다.
+**VRAM 을 재려면 조건마다 Isaac 을 껐다 켜야 한다.** 한 세션에서 해상도를
+바꿔 가며 A/B 를 하면 뒤쪽 조건일수록 누적분을 얹은 값이 나온다 — 12 회에
+900 MiB 면 변경당 약 75 MiB 로, 위 A/B 표의 라운드별 차이(-47 ~ +132 MiB)와
+같은 자릿수다. 부호가 라운드마다 뒤집힌 데에 이것도 섞여 있다고 봐야 한다.
+
 ### 남은 것
 
 - [ ] SAM3 를 다른 머신으로 분리 — 2.3 GB 를 통째로 뺄 수 있으나 네트워크
       경유 지연이 붙는다. 지금 발행률이 0.5 Hz 라 감당 가능한지 재봐야 한다.
+- [ ] `~/.bashrc` 의 `RMW_IMPLEMENTATION` 중복 export 정리 (134 줄 fastrtps /
+      140 줄 cyclonedds, 뒤엣것이 이긴다). Windows 쪽이 fastrtps 고정이라
+      터미널에서 직접 띄우면 DDS 가 안 붙는다. 비대화형 셸에서는 안 드러나므로
+      스크립트 검증만으로는 못 잡는다 (§8).
