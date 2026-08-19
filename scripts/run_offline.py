@@ -42,7 +42,7 @@ def bag_color_fps(bag_path):
     return (len(ts) - 1) / ((ts[-1] - ts[0]) * 1e-9)
 
 
-def read_bag(bag_path, max_frames=None):
+def read_bag(bag_path, max_frames=None, sync_slop=0.05):
     """(stamp_s, rgb, depth_mm, K)를 스트리밍으로 yield — 메모리 O(1).
 
     bag 메시지는 시간순이므로, 최근 depth만 deque로 들고 있다가 각 색상
@@ -61,7 +61,13 @@ def read_bag(bag_path, max_frames=None):
             if K is None or not depths:
                 return None
             dt, dimg = min(depths, key=lambda d: abs(d[0] - ct))
-            if abs(dt - ct) > 50e6:  # >50ms: 짝 없음
+            if abs(dt - ct) > sync_slop * 1e9:  # 창 밖이면 짝 없음
+                # 50 ms 기본값은 두 스트림이 30 Hz 로 나란히 오는
+                # RealSense bag 기준이다. Isaac 실기동 bag 처럼 color 와
+                # depth 가 서로 다른 틱에서 따로 유실되면 짝이 거의 안 맞는다
+                # (실측 2026-08-19: isaac_belt bag 의 color 78 장 중 4 장만
+                # 처리됐다). 그때는 --sync-slop 을 올릴 것. 라이브 경로의
+                # sync_slop 파라미터(5f881d0)와 같은 문제다.
                 return None
             cmsg = reader.deserialize(craw, cconn.msgtype)
             rgb = img_to_np(cmsg)
@@ -119,6 +125,9 @@ def main():
     ap.add_argument("--prompts", required=True, help="comma-separated object names")
     ap.add_argument("--out", default="output")
     ap.add_argument("--max-frames", type=int, default=None)
+    ap.add_argument("--sync-slop", type=float, default=0.05,
+                    help="color-depth 짝짓기 허용 시간차(초). 기본 0.05 는 "
+                         "30 Hz RealSense bag 기준 — Isaac bag 은 올려야 한다")
     ap.add_argument("--threshold", type=float, default=0.4)
     ap.add_argument("--show", action="store_true", help="처리 중 오버레이 창 표시")
     ap.add_argument("--max-per-prompt", type=int, default=1,
@@ -169,7 +178,8 @@ def main():
         cw.writerow(CSV_HEADER)
         t_start = time.perf_counter()
         n = 0
-        for stamp, rgb, depth, K, sync_ms in read_bag(args.bag, args.max_frames):
+        for stamp, rgb, depth, K, sync_ms in read_bag(
+                args.bag, args.max_frames, args.sync_slop):
             t0 = time.perf_counter()
             objects = pipeline.process(rgb, depth, K, prompts, stamp)
             proc_ms = (time.perf_counter() - t0) * 1000
