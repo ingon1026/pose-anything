@@ -15,6 +15,12 @@ from .geometry import ObbResult, match_axes, smooth_rotation
 T_STALE = 0.5      # s — 그리퍼에 도달할 수 있는 stale pose 최대 나이 (안전 속성)
 CONFIRM_N = 3      # 신생 트랙 발행 승격에 필요한 수락 관측 수 (F4 반쪽 재탄생 방어)
 PUB_POS_STD_MAX = 0.02  # m — 발행 허용 위치 불확실성 상한 (로봇 사양 확정 전 잠정)
+# 조각 판정 포함률. 화면 경계에서 잘린 물체는 SAM3가 부분 조각을 별개
+# 인스턴스로 내는데, 조각↔본체 IoU는 구조적으로 작아(~0.1) 매칭 문턱을
+# 못 넘고 새 트랙이 태어난다. 포함률로 재면 분리가 깨끗하다 —
+# isaac_belt_moving 실측: 서로 다른 블록 12.6만 쌍의 99%분위 0.000·최대
+# 0.269 vs 조각의 중앙값 0.61~1.00. 0.3~0.5 전 구간이 고원이라 0.5로 둔다.
+FRAGMENT_CONTAIN = 0.5
 
 
 def box_iou(a, b):
@@ -25,6 +31,18 @@ def box_iou(a, b):
     area_a = (a[2] - a[0]) * (a[3] - a[1])
     area_b = (b[2] - b[0]) * (b[3] - b[1])
     return inter / (area_a + area_b - inter + 1e-9)
+
+
+def containment(inner, outer):
+    """inner 박스가 outer 안에 들어간 비율 (교집합 ÷ inner 면적).
+
+    IoU와 달리 크기 차가 커도 값이 죽지 않는다 — 조각 대 본체는 IoU가
+    구조적으로 작아(실측 ~0.1) 매칭 문턱 0.3을 못 넘지만 포함률은 크다.
+    """
+    x1, y1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    x2, y2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    return inter / ((inner[2] - inner[0]) * (inner[3] - inner[1]) + 1e-9)
 
 
 def _expand(box, k):
@@ -271,6 +289,12 @@ class IouTracker:
                     used_t.add(ti)
                     pairs.append((t, d))
                 continue  # 범위 밖·depth 충돌이면 동결 유지
+            # 기존 트랙 안에 들어앉은 검출은 그 물체의 조각이다 (경계 절단
+            # 물체에서 발생). 매칭은 IoU가 작아 실패했지만 새 트랙도 아니다.
+            if any(t.label == d["label"]
+                   and containment(d["box"], t.box) > FRAGMENT_CONTAIN
+                   for t in self.tracks):
+                continue
             alive = sum(1 for t in self.tracks if t.label == d["label"])
             if self.max_per_label > 0 and alive >= self.max_per_label:
                 continue
