@@ -65,6 +65,8 @@ class PerceptionNode(Node):
         self.declare_parameter("sync_slop", 0.05)
         self.declare_parameter("sync_queue_size", 5)
         # 발행 점수 하한. 0.0 = 끔. 근거와 주의는 Track.publishable 의 주석.
+        # 중복 병합 — 벨트 씬에서 보정된 상수라 기본 꺼짐 (tracker.KAPPA_PHYS 주석)
+        self.declare_parameter("enable_merge", False)
         self.declare_parameter("publish_score_min", 0.0)
         # SAM3 입력 해상도. 0 = 기본 1008px.
         # Isaac Sim 과 GPU 를 나눠 쓰면 VRAM 이 부족해지고, 그러면 렌더프로덕트
@@ -150,7 +152,8 @@ class PerceptionNode(Node):
                          image_size=self.get_parameter("image_size").value),
             detect_interval=self.get_parameter("detect_interval").value,
             max_per_prompt=self.get_parameter("max_per_prompt").value,
-            pub_score_min=self.get_parameter("publish_score_min").value)
+            pub_score_min=self.get_parameter("publish_score_min").value,
+            enable_merge=self.get_parameter("enable_merge").value)
         # run.sh가 이 문자열을 grep으로 대기한다 — 문구 변경 시 run.sh도 수정
         self.get_logger().info("SAM3 ready")
 

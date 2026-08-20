@@ -108,7 +108,7 @@ def _touches_border(mask):
 class PerceptionPipeline:
     def __init__(self, detector, depth_scale=0.001, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
-                 max_per_prompt=1, pub_score_min=0.0):
+                 max_per_prompt=1, pub_score_min=0.0, enable_merge=False):
         self.detector = detector
         self.depth_scale = depth_scale
         self.rot_alpha = rot_alpha
@@ -116,7 +116,8 @@ class PerceptionPipeline:
         # (검출 단계에서 자르면 score 역전 시 ID가 끊김)
         self.tracker = IouTracker(iou_threshold, max_missed,
                                   max_per_label=max_per_prompt,
-                                  pub_score_min=pub_score_min)
+                                  pub_score_min=pub_score_min,
+                                  enable_merge=enable_merge)
         self.detect_interval = max(1, detect_interval)
         self._frame_idx = 0
         self._prev_gray = None
@@ -178,6 +179,11 @@ class PerceptionPipeline:
             track.mask = det["mask"]
             self._update_geometry(track, depth, K)
             out.append(track)
+        # 이 프레임 필터가 갱신된 뒤에 중복을 판정한다 — 판정이 두 트랙의
+        # 상태·공분산을 보므로 갱신 전에 걸면 한 프레임 낡은 상태로 본다.
+        dead = self.tracker.merge_duplicates()
+        if dead:
+            out = [t for t in out if t.track_id not in dead]
         return self._with_frozen(out)
 
     def _track_frame(self, gray, depth, K):

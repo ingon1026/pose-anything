@@ -4,11 +4,12 @@
 χ² 게이트로 대체됐다 — 이 파일은 association(2D 매칭·생명주기)과
 회전 연속성만 담당한다 (docs/fusion_design_2026-08.md).
 """
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from .fusion import TrackFilter
+from .fusion import CHI2_3DOF, TrackFilter
 from .geometry import ObbResult, match_axes, smooth_rotation
 
 # ── 생명주기 상수 (근거: docs/fusion_design_2026-08.md §4) ──
@@ -21,6 +22,24 @@ PUB_POS_STD_MAX = 0.02  # m — 발행 허용 위치 불확실성 상한 (로봇
 # isaac_belt_moving 실측: 서로 다른 블록 12.6만 쌍의 99%분위 0.000·최대
 # 0.269 vs 조각의 중앙값 0.61~1.00. 0.3~0.5 전 구간이 고원이라 0.5로 둔다.
 FRAGMENT_CONTAIN = 0.5
+# ── 중복 병합 (생성 후 수렴한 중복 트랙의 사후 삭제) ──
+# 생성 시점 가드(FRAGMENT_CONTAIN)는 "태어날 때 남의 박스 안"만 막는다.
+# 떨어져 태어나 나중에 같은 자리로 수렴한 중복은 그 가드를 통과한다.
+# 실측(isaac_belt_moving): 한 물체에 트랙 2개가 1703프레임 공존하고,
+# greedy 매칭이 두 마스크를 프레임마다 뒤바꿔 배정해 생존 트랙의
+# z-std가 0.72 → 3.58mm(5배)로 악화됐다. 발행만 억제해서는 못 고친다 —
+# 중복 트랙이 매칭 층에서 계속 검출을 뺏어가기 때문이다.
+PSI_AXIS = 1        # 비관통 판정에 쓸 정렬 extent 성분. 하방 카메라는 높이를
+                    # 못 봐 최단축이 12% 프레임에서 0이 된다 → 중간축(관측
+                    # 평면 XY의 내접원)이 유일하게 신뢰 가능한 축.
+KAPPA_PHYS = 2.71   # 강체 비관통 상한 계수. 원리값 1은 실측에서 죽었다 —
+                    # 항등식 입력(추정 extent·중심)이 부정확해 전 씬이 문턱
+                    # 1에서 역전된다. 고원 [2.106, 3.500]의 로그 중점.
+                    # **벨트 씬 전용** — enable_merge 기본 꺼짐과 짝이다.
+TAU_EXT = 0.076     # 장축 log-extent 거부권. 이보다 크게 다르면 크기 주장이
+                    # 어긋난 것이라 병합 보류(잘린 트랙이 이겨 파지 폭이
+                    # 틀어지는 것을 막는다). 고원 [0.025, 0.232]의 로그 중점.
+                    # 유도값(R_LOGE_FLOOR 3.29σ = 0.233)은 고원 밖이라 버렸다.
 
 
 def box_iou(a, b):
@@ -194,7 +213,8 @@ class Track:
 
 class IouTracker:
     def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0,
-                 occlusion_hold=12, rescue_buffer=2.5, pub_score_min=0.0):
+                 occlusion_hold=12, rescue_buffer=2.5, pub_score_min=0.0,
+                 enable_merge=False):
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
         # 가림 대응: missed가 max_missed를 넘으면 삭제 대신 "동결" —
@@ -211,12 +231,83 @@ class IouTracker:
         self.rescue_buffer = rescue_buffer
         # 트랙 생성 시 각 Track 에 그대로 넘긴다 (Track.publishable 참고)
         self.pub_score_min = pub_score_min
+        # 중복 병합. KAPPA_PHYS가 벨트 씬에서 측정된 값이라 기본은 끈다 —
+        # 실기 bag은 라벨이 유일해 중복 표본이 없고(test2~5 전부), 검증되지
+        # 않은 씬에서 켜면 순수한 위험이다. pub_score_min과 같은 관례.
+        self.enable_merge = enable_merge
+        self._merge_runs = {}   # (id_lo, id_hi) -> (연속 성립 횟수, tau 이력)
         self.tracks: list[Track] = []
         self._next_id = 1
 
     def reset(self):
         self.tracks = []
         self._next_id = 1
+        self._merge_runs = {}
+
+    def _dup_gate(self, a, b, hist):
+        """두 트랙이 같은 물체인가 — 장축 일치 ∧ 강체 비관통 ∧ 위치 χ²."""
+        fa, fb = a.filter, b.filter
+        # (1) 장축 거부권. 크기 주장이 유의하게 다르면 어느 쪽이 옳은지
+        # 상태만으로 못 가리므로 병합을 보류한다 — 잘린 트랙이 이기면
+        # 로봇 파지 폭이 그만큼 틀어진다. 프레임별 tau는 진짜 중복과
+        # ID 인수인계가 겹치므로 심사창 중앙값으로 판정한다.
+        tau = abs(np.log(max(float(fa.extent_sorted[0]), 1e-9)
+                         / max(float(fb.extent_sorted[0]), 1e-9)))
+        hist.append(tau)
+        if float(np.median(hist)) > TAU_EXT:
+            return False
+        # (2) 강체 비관통. 두 중심이 물체 반지름 합보다 가까울 수 없다.
+        d = fa.center - fb.center
+        ea = float(np.sort(fa.extent_sorted)[PSI_AXIS])
+        eb = float(np.sort(fb.extent_sorted)[PSI_AXIS])
+        if float(np.linalg.norm(d)) >= KAPPA_PHYS * (ea + eb) / 2:
+            return False
+        # (3) 위치 χ². "한 트랙의 관측이 다른 트랙의 상태에서 나올 수
+        # 있었나"이므로 P가 아니라 혁신 척도(innovation_std)를 쓴다 —
+        # 두 트랙은 같은 물체를 다른 마스크로 보아 계통 편차를 갖는다.
+        # r_extra는 일부러 뺀다: 관측 측 불확실성이라 이동 중 게이트를
+        # 넓히는데, 이동 중이야말로 두 트랙을 가장 못 믿을 때다.
+        sv = np.array([fa.innovation_std(i) ** 2 + fb.innovation_std(i) ** 2
+                       for i in range(3)])
+        return float(np.sum(d * d / sv)) <= CHI2_3DOF
+
+    def merge_duplicates(self):
+        """생성 후 수렴한 중복 트랙을 삭제한다 (키프레임에서만 호출).
+
+        이긴 트랙의 상태는 건드리지 않는다 — 상관된 관측을 합치면 P가
+        진실보다 작아져 게이트가 좁아지고 교착이 돌아온다. 진 트랙은
+        통째로 버린다. 삭제된 track_id 집합을 반환."""
+        if not self.enable_merge or self.max_per_label == 1:
+            return set()
+        # 동결·미신선 트랙은 제외 — 가림 중 ID를 지키는 occlusion_hold
+        # 계약과 정면으로 충돌하고, 필터가 관측을 전부 기각 중인 고착
+        # 트랙(stale obb)으로 거리 판정을 하게 된다.
+        ok = [t for t in self.tracks if t.filter is not None
+              and t.confirmed and t.fresh and not t.frozen]
+        hits, runs = set(), {}
+        for i, a in enumerate(ok):
+            for b in ok[i + 1:]:
+                if a.label != b.label:
+                    continue
+                key = (min(a.track_id, b.track_id), max(a.track_id, b.track_id))
+                run, hist = self._merge_runs.get(key, (0, deque(maxlen=CONFIRM_N)))
+                run = run + 1 if self._dup_gate(a, b, hist) else 0
+                runs[key] = (run, hist)
+                if run >= CONFIRM_N:
+                    hits.add(key)
+        # 이번에 평가되지 않은 쌍은 키가 사라져 다음 번 0부터 — 제자리
+        # 갱신하면 카운트가 공백을 건너뛰어 "연속"이 깨진다. 죽은 id도
+        # 여기서 자동 정리된다.
+        self._merge_runs = runs
+        dead, taken = set(), set()
+        for lo_id, hi_id in sorted(hits):     # 결정적 순서
+            if lo_id in taken or hi_id in taken:
+                continue                      # 한 패스 = 매칭 1개
+            taken.update((lo_id, hi_id))
+            dead.add(hi_id)                   # 승자 = 오래된(작은) id
+        if dead:
+            self.tracks = [t for t in self.tracks if t.track_id not in dead]
+        return dead
 
     def _greedy_match(self, det_pool, used_t, exclude_depth_conflict=True):
         """같은 라벨 greedy IoU 매칭 — (track_idx, det) 쌍을 yield."""
