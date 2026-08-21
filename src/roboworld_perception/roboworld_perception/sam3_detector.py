@@ -49,12 +49,30 @@ class Sam3Detector:
         self.assoc_threshold = min(0.1, threshold)
         self.mask_threshold = mask_threshold
         self._warned = set()
-        self._text_cache = {}  # 프롬프트별 토큰화 결과 (키프레임마다 재계산 방지)
+        self._text_cache = {}  # 프롬프트별 텍스트 임베딩 (아래 _text_inputs 참고)
 
     def _text_inputs(self, text):
+        """프롬프트의 텍스트 임베딩을 캐시해 돌려준다.
+
+        토큰화만 캐시하면 CLIP 텍스트 인코더가 **키프레임마다 프롬프트마다**
+        다시 돈다 (실측 29.7ms / 3프롬프트, 키프레임 SAM3 시간의 7%).
+        프롬프트는 런 중 고정이므로 한 번만 계산하면 된다.
+
+        forward 는 text_embeds 를 주면 get_text_features 를 건너뛴다
+        (modeling_sam3.py 의 `if text_embeds is None:`). 여기서 하는 계산이
+        그 분기가 하던 것과 같은 것이라 결과가 바뀌지 않는다 — 다만 XOR
+        검사가 있어 input_ids 는 함께 넘기면 안 되고, attention_mask 는
+        text_mask 로 따로 쓰이므로 계속 넘겨야 한다.
+        """
         if text not in self._text_cache:
-            self._text_cache[text] = self.processor(
-                text=text, return_tensors="pt").to(self.device)
+            inputs = self.processor(text=text, return_tensors="pt").to(self.device)
+            self._text_cache[text] = {
+                "text_embeds": self.model.get_text_features(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.get("attention_mask"),
+                    return_dict=True).pooler_output,
+                "attention_mask": inputs.get("attention_mask"),
+            }
         return self._text_cache[text]
 
     @torch.no_grad()
