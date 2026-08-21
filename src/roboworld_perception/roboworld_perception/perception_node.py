@@ -77,7 +77,7 @@ class PerceptionNode(Node):
         self.declare_parameter("image_size", 0)
         # 벨트 평면 구속 OBB. 고정 카메라면 첫 프레임 추정으로 충분하지만,
         # 벨트가 화면의 20% 미만이거나 별도 캘리브 값이 있으면 직접 준다.
-        self.declare_parameter("enable_footprint_gate", False)
+        self.declare_parameter("enable_footprint_gate", True)
         self.declare_parameter("use_belt_plane", False)
         self.declare_parameter("belt_plane", "")  # "a,b,c,d" (n·p+d=0), 빈 값=추정
         # 카메라가 "위(1m)에서 아래를 본다"는 world TF. RealSense TF 트리의

@@ -157,12 +157,12 @@ def _touches_border(mask):
 # 필터의 extent 로는 못 잡는다. 프레임당 변화가 3mm 라 χ² 를 매번 통과하고,
 # 통과할 때마다 extent 상태가 따라 내려가 다음 프레임의 기준이 된다 — 천 번의
 # 작은 베임이다. 그래서 **드리프트보다 훨씬 느린 기준**을 따로 둔다.
-# **기본 꺼짐** (enable_merge·use_belt_plane 과 같은 관례). 실측으로 물체
-# 형상에 따라 이득과 손해가 갈린다 — docs/footprint_gate_2026-08-21.md 의
-# 표를 보고 씬별로 켤 것. 요약: 뭉툭한 물체(book·notebook)는 오염 발행이
-# 17%->0%, 19%->5% 로 사라지지만, 세장 물체(keyboard 402x126mm)는 어느
-# 문턱에서도 악화한다(4%->22~39%). 면적 하나로 보므로 세장 물체는 한 축만
-# 잘려도 면적이 크게 변하는 것이 원인으로 보인다.
+# **기본 켜짐.** 판정이 비대칭이 된 뒤로는 악화하는 케이스가 없다 —
+# 가림 씬 전 물체에서 30mm 초과 발행이 줄고(keyboard 4->0%, black bag
+# 74->41%, book 17->1%, gray notebook 19->5%), 정지·이동·등속 대조군은
+# 전부 무회귀다(test2/test3 check_accuracy PASS, isaac 트랙 동일).
+# 대칭 판정이던 초기 버전은 keyboard 를 4->39% 로 악화시켰다 —
+# 그 원인과 실측표는 docs/footprint_gate_2026-08-21.md.
 FOOTPRINT_TAU = 0.14     # |log(면적/기준)| 이 넘으면 절단 관측으로 본다.
                          # 실측 고원 [0.10, 0.20] 의 로그 중점(KAPPA_PHYS·
                          # TAU_EXT 와 같은 산출). 0.08 은 정상 프레임 오탐이
@@ -190,6 +190,18 @@ def _footprint_truncated(track, obb):
 
     미터 면적으로 비교한다 — 강체의 미터 풋프린트는 거리와 무관하게 일정하고,
     각면적(픽셀 수)은 물체가 광축 방향으로 움직이면 그 자체로 변한다.
+
+    **판정이 비대칭인 것이 핵심이다.** 부분 가림은 보이는 영역을 *줄인다*.
+    면적이 늘어나는 것은 마스크가 번지거나 인접 물체를 먹은 것인데, 그건
+    중심을 밀지 않는다 — test4 raw 실측(프레임별 중심 이동 중앙값):
+
+        면적 감소 < -0.14 : keyboard 134mm · book 87mm · black bag 184mm
+        면적 증가 > +0.14 : keyboard 1.5mm · book 2.1mm · black bag 30mm
+
+    대칭(|dev| > TAU)으로 걸면 이 정상 프레임들을 통째로 버린다 —
+    keyboard 112프레임, book 203프레임. 실제로 그것이 keyboard 악화
+    (>30mm 4% -> 39%)의 원인이었다. mask_depth_to_points 의 near/far 밴드
+    비대칭과 같은 계보다: 막으려는 것과 살려야 하는 것이 서로 반대 방향에 있다.
     """
     e = np.sort(np.asarray(obb.extent))[::-1]
     la = float(np.log(e[0] * e[1] + 1e-12))
@@ -198,7 +210,7 @@ def _footprint_truncated(track, obb):
         return False, 0.0
     dev = la - track.area_ref
     track.area_ref += FOOTPRINT_ALPHA * dev
-    return abs(dev) > FOOTPRINT_TAU, abs(dev)
+    return dev < -FOOTPRINT_TAU, abs(dev)
 
 
 def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
@@ -219,7 +231,7 @@ class PerceptionPipeline:
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1, pub_score_min=0.0, enable_merge=False,
                  belt_plane=None, use_belt_plane=False,
-                 enable_footprint_gate=False):
+                 enable_footprint_gate=True):
         self.detector = detector
         self.depth_scale = depth_scale
         self.rot_alpha = rot_alpha
