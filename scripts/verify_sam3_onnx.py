@@ -6,7 +6,6 @@ export 가 성공해도 출력이 틀리면 소용없다. onnxruntime(CPU) 로 �
 사용: python3 scripts/verify_sam3_onnx.py [onnx경로]
 """
 import sys
-from pathlib import Path
 
 import numpy as np
 import torch
