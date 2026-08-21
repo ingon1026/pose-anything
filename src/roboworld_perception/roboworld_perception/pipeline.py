@@ -230,7 +230,7 @@ class PerceptionPipeline:
     def __init__(self, detector, depth_scale=0.001, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1, pub_score_min=0.0, enable_merge=False,
-                 belt_plane=None, use_belt_plane=False,
+                 belt_plane=None, use_belt_plane=True,
                  enable_footprint_gate=True):
         self.detector = detector
         self.depth_scale = depth_scale
@@ -244,11 +244,11 @@ class PerceptionPipeline:
         self.detect_interval = max(1, detect_interval)
         # 벨트 평면 (n, d). 고정 카메라라 상수 — 첫 성공 후 캐시한다.
         # 미리 주면(캘리브 노브) 그 값으로 고정하고 다시 맞추지 않는다.
-        # 기본 꺼짐: Isaac 정답 대비 두께 +0.7mm·중심 +0.4mm 로 검증됐지만,
-        # 실기 test4 에서 가림 중 book 발행이 105 -> 8 프레임으로 줄었다
-        # (관측이 정밀해져 R̂ 이 하한으로 내려가 χ² 게이트가 좁아진 대가 —
-        # LK 마스크 드리프트를 즉시 기각한다). enable_merge·pub_score_min 과
-        # 같은 관례로, 씬별로 켜서 쓴다.
+        # **기본 켜짐** (2026-08-21 오후 재평가). 오전에는 꺼두었는데, 그
+        # 유일한 근거였던 "test4 가림 중 book 발행 105 -> 8 프레임" 이
+        # 풋프린트 게이트로 사라졌다 — 원인이 평면 구속이 아니라 부분 가림에
+        # 잘린 관측이었기 때문이다. 게이트를 켠 상태로 다시 재니 평면 구속이
+        # 전 물체에서 이긴다(docs/belt_plane_2026-08-21.md 의 재평가 절).
         self.use_belt_plane = use_belt_plane
         self.belt_plane = belt_plane
         self._plane_fixed = belt_plane is not None

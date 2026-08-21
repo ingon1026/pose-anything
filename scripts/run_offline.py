@@ -145,9 +145,9 @@ def main():
     ap.add_argument("--no-footprint-gate", action="store_true",
                     help="부분 가림(풋프린트 절단) 관측 기각 끄기 (기본 켜짐 — "
                          "docs/footprint_gate_2026-08-21.md 의 물체별 표 참고)")
-    ap.add_argument("--belt-plane-on", action="store_true",
-                    help="벨트 평면 구속 OBB 켜기 (기본 꺼짐 — 관례는 "
-                         "PerceptionPipeline.use_belt_plane 주석 참고)")
+    ap.add_argument("--no-belt-plane", action="store_true",
+                    help="벨트 평면 구속 OBB 끄기 (기본 켜짐 — 근거는 "
+                         "docs/belt_plane_2026-08-21.md)")
     ap.add_argument("--belt-plane", default="",
                     help="벨트 평면 a,b,c,d (n·p+d=0). 생략하면 첫 프레임에서 추정")
     ap.add_argument("--raw", action="store_true",
@@ -172,7 +172,7 @@ def main():
         max_per_prompt=args.max_per_prompt,
         pub_score_min=args.publish_score_min,
         enable_merge=args.enable_merge,
-        use_belt_plane=args.belt_plane_on,
+        use_belt_plane=not args.no_belt_plane,
         enable_footprint_gate=not args.no_footprint_gate,
         belt_plane=parse_plane(args.belt_plane))
 
