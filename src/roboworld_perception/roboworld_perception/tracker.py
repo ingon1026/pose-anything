@@ -110,6 +110,9 @@ class Track:
     filter: TrackFilter | None = field(default=None, repr=False)  # 위치+크기 상태
     frozen: bool = False       # 연속 미검출로 동결 (association 부기 — 게이트 아님)
     plane_constrained: bool = False  # 필터를 시드한 관측 규약 (벨트 평면 구속 여부)
+    # 풋프린트 면적의 느린 기준(log m²) — 부분 가림 판정용. 필터의 extent 와
+    # 따로 두는 이유는 pipeline._footprint_truncated 주석 참고.
+    area_ref: float | None = field(default=None, repr=False)
     n_accepted: int = 0        # 수락된 pose 관측 수 (M-of-N 승격용)
     last_accept_t: float | None = None  # 마지막 수락 시각 (신선도)
     now: float = 0.0           # 파이프라인이 매 프레임 주입하는 현재 시각

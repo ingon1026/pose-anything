@@ -94,12 +94,29 @@ def test_flow_paused_on_intrusion():
     assert not depth_intrusion(t, z_occ)       # 유한 시간 안에 해제 (교착 없음)
 
 
+def make_rigid(depth_mm, w_m=0.2667, h_m=0.2):
+    """거리가 변해도 **미터 크기가 같은** 강체의 마스크 — 가까워지면 픽셀이
+    커진다. make()는 픽셀을 고정해서 물체가 다가올수록 미터 크기가 z²로
+    줄어드는데, 그건 실제 검출기가 내는 마스크가 아니다(그 상황은 부분 가림과
+    구분이 안 된다 — pipeline._footprint_truncated 참고)."""
+    z = depth_mm / 1000.0
+    hw = int(round(w_m / 2 * K[0, 0] / z))
+    hh = int(round(h_m / 2 * K[1, 1] / z))
+    cu, cv = int(K[0, 2] - 20), int(K[1, 2] + 10)
+    depth = np.zeros((240, 320), np.uint16)
+    mask = np.zeros((240, 320), bool)
+    sl = (slice(max(0, cv - hh), cv + hh), slice(max(0, cu - hw), cu + hw))
+    mask[sl] = True
+    depth[sl] = depth_mm
+    return mask, depth
+
+
 def test_gradual_depth_change_tracked():
     """벨트 접근 속도(~45mm/s = 3mm/frame)의 점진 변화는 계속 수락된다."""
     pipe = PerceptionPipeline(NoDetector())
     t = seeded_track(pipe)
     for mm in range(1000, 910, -3):
-        t.mask, depth = make(mm)
+        t.mask, depth = make_rigid(mm)
         step(pipe, t, depth)
     assert t.publishable
     assert abs(t.obb.center[2] - 0.91) < 0.01  # 상태가 변화를 따라감
@@ -163,3 +180,65 @@ def test_thick_object_top_surface_is_not_intrusion():
     assert abs(t.surface_z - (z_center - thk / 2)) < 1e-6
     assert not depth_intrusion(t, t.surface_z)        # 정상 검출
     assert depth_intrusion(t, t.surface_z - 0.2)      # 진짜 가리개
+
+
+def make_partial(depth_mm, cover_px):
+    """가리개가 마스크의 왼쪽 cover_px 만큼을 덮은 관측 — 보이는 영역이 줄고
+    그 중심이 오른쪽으로 밀린다. 부분 가림의 최소 재현."""
+    depth = np.zeros((240, 320), np.uint16)
+    mask = np.zeros((240, 320), bool)
+    sl = (slice(100, 160), slice(100 + cover_px, 180))
+    mask[sl] = True
+    depth[sl] = depth_mm
+    return mask, depth
+
+
+def test_partial_occlusion_does_not_move_state():
+    """가리개에 잘린 관측은 상태를 옮기지 못한다.
+
+    보이는 부분의 중심은 물체의 중심이 아니다 — 화면 절단(_touches_border)에서
+    이미 아는 사실인데 가리개 절단은 아무도 안 보고 있었다. 필터의 extent 로는
+    못 잡는다: 프레임당 변화가 작아 χ² 를 매번 통과하고, 통과할 때마다 extent
+    상태가 따라 내려가 다음 프레임의 기준이 된다(천 번의 작은 베임).
+    실측 test4 book: 풋프린트 290x241 -> 267x170mm 동안 중심이 14 -> 95mm.
+    """
+    pipe = PerceptionPipeline(NoDetector())
+    t = seeded_track(pipe)
+    x_before = float(t.filter.center[0])
+    for _ in range(10):                      # 절반쯤 덮인 관측만 계속
+        t.mask, depth = make_partial(1000, 40)
+        step(pipe, t, depth)
+    assert abs(float(t.filter.center[0]) - x_before) < 0.005   # 중심 안 밀림
+    assert not t.publishable                                   # 발행도 멈춤
+
+
+def test_partial_occlusion_escape_is_bounded():
+    """기준을 동결하지 않기 때문에 교착이 구조적으로 불가능하다.
+
+    물체가 실제로 작아졌다면(또는 트랙이 다른 것에 붙었다면) 기준이 기하급수로
+    따라가 유한 시간 안에 플래그가 풀린다. 동결 + '연속 N 회 일관하면 채택'
+    관용구는 여기서 못 쓴다 — 매끄러운 드리프트는 언제나 자기들끼리 일관해서
+    그 탈출구로 그냥 걸어 들어온다(실측: 검출이 72% -> 14% 로 무너졌다).
+    """
+    pipe = PerceptionPipeline(NoDetector())
+    t = seeded_track(pipe)
+    accepted = None
+    for i in range(300):
+        t.mask, depth = make_partial(1000, 40)
+        before = t.last_accept_t
+        step(pipe, t, depth)
+        if t.last_accept_t != before:
+            accepted = i
+            break
+    assert accepted is not None, "지속되는 새 크기가 영구 기각됐다 (교착)"
+    assert accepted < 200          # 상계 — α=0.02 의 기하급수 수렴
+
+
+def test_small_footprint_wobble_still_accepted():
+    """TAU 안의 정상 크기 요동은 그대로 수락된다 (게이트가 과민하지 않다)."""
+    pipe = PerceptionPipeline(NoDetector())
+    t = seeded_track(pipe)
+    for cover in (0, 3, 0, 4, 0, 3):        # 면적 ~5% 요동 (TAU=0.14 안)
+        t.mask, depth = make_partial(1000, cover)
+        step(pipe, t, depth)
+    assert t.publishable

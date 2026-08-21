@@ -146,6 +146,55 @@ def _touches_border(mask):
                 or mask[:, 0].any() or mask[:, -1].any())
 
 
+# ── 부분 가림 = 화면 절단과 같은 종류의 사건 ────────────────
+# 가리개가 물체를 조금씩 덮으면 보이는 영역이 줄고, 그 줄어든 영역의 중심은
+# 물체의 중심이 아니다. 화면 경계 절단(_touches_border)에서 이미 알고 있는
+# 사실인데, 가리개에 의한 절단은 아무도 안 보고 있었다.
+#
+# test4 book 실측(5.5~7.9s): 풋프린트가 290x241 -> 267x170mm 로 줄어드는 동안
+# 중심이 14 -> 95mm 로 함께 밀렸다. 둘은 한 몸으로 움직인다.
+#
+# 필터의 extent 로는 못 잡는다. 프레임당 변화가 3mm 라 χ² 를 매번 통과하고,
+# 통과할 때마다 extent 상태가 따라 내려가 다음 프레임의 기준이 된다 — 천 번의
+# 작은 베임이다. 그래서 **드리프트보다 훨씬 느린 기준**을 따로 둔다.
+FOOTPRINT_TAU = 0.14     # |log(면적/기준)| 이 넘으면 절단 관측으로 본다.
+                         # 실측 고원 [0.10, 0.20] 의 로그 중점(KAPPA_PHYS·
+                         # TAU_EXT 와 같은 산출). 0.08 은 정상 프레임 오탐이
+                         # 41% 로 폭발하고 0.25 는 검출이 0 이 된다.
+FOOTPRINT_ALPHA = 0.02   # 기준 EMA 이득 — 시정수 ~50프레임. 실측 드리프트는
+                         # 25프레임(1.5s)이라 기준이 절반도 못 따라간다.
+
+
+def _footprint_truncated(track, obb):
+    """이 관측의 풋프린트가 트랙의 기준에서 벗어났는가 (절단/오염 판정).
+
+    반환: (절단 여부, |log 편차|). 부작용으로 기준을 EMA 갱신한다.
+
+    **플래그가 떠도 기준은 계속 따라간다.** 동결이 더 잘 잡을 것 같지만 실측은
+    반대였다(드리프트 검출 동일 72%, 정상 프레임 오탐은 7.2% -> 17.8% 로 악화).
+    그리고 동결에는 탈출구가 필요한데, "연속 N 회 서로 일관하면 채택" 같은
+    관용구는 여기서 안 통한다 — **매끄러운 드리프트는 언제나 자기들끼리
+    일관하기 때문**이다(실측: 채택 상계를 붙이자 검출이 72% -> 14% 로 무너졌다).
+    창 스프레드로 "정착 vs 이동"을 가르려 해도 분포가 겹친다(드리프트 p50
+    0.078 vs 정착 p50 0.049).
+
+    그냥 따라가게 두면 교착이 구조적으로 불가능해진다 — 편차 D 는 기하급수로
+    닫히므로 어떤 편차든 ln(TAU/D)/ln(1-α) 프레임 안에 플래그가 풀린다
+    (면적 4 배 오염이어도 ~113프레임/7.5초). 상계가 상수 하나에서 나온다.
+
+    미터 면적으로 비교한다 — 강체의 미터 풋프린트는 거리와 무관하게 일정하고,
+    각면적(픽셀 수)은 물체가 광축 방향으로 움직이면 그 자체로 변한다.
+    """
+    e = np.sort(np.asarray(obb.extent))[::-1]
+    la = float(np.log(e[0] * e[1] + 1e-12))
+    if track.area_ref is None:
+        track.area_ref = la
+        return False, 0.0
+    dev = la - track.area_ref
+    track.area_ref += FOOTPRINT_ALPHA * dev
+    return abs(dev) > FOOTPRINT_TAU, abs(dev)
+
+
 def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
     """검출 마스크 바로 바깥의 링에서 지지면(벨트)을 맞춘다.
 
@@ -361,6 +410,20 @@ class PerceptionPipeline:
         # 게이트 폭(~2mm)을 넘어 기각된다. 정지 물체에서는 0이라 무해.
         r_extra = ((speed * self._last_dt) ** 2 + (speed * SYNC_STD) ** 2
                    + (FLOW_STEP_STD * steps) ** 2)
+        # 가리개에 의한 절단도 화면 절단과 같은 사건이다 — 보이는 부분의
+        # 중심은 물체의 중심이 아니다. 판정은 화면 경계와 무관하므로 먼저
+        # 부르고(기준 EMA 가 매 프레임 돌아야 한다), 처리는 border 와 합친다.
+        if _footprint_truncated(track, obb)[0]:
+            # 가리개에 잘린 관측 — 보이는 부분의 중심은 물체의 중심이 아니다.
+            # depth 침입과 같은 처리로 **관측을 통째로 버린다**. 화면 절단처럼
+            # r_extra 로 흡수하지 않는 이유: 불확실성을 키우면 게이트가 함께
+            # 넓어져 오염 관측이 오히려 더 잘 수락된다(합성 회귀에서 500mm
+            # 침입이 통과했다). 우리가 원하는 건 "덜 믿는다" 가 아니라
+            # "이 프레임은 안 본다" 이다.
+            # 관측이 없으면 신선도 타이머가 흘러 T_STALE 뒤 발행이 멈추고,
+            # predict 가 P 를 계속 키우므로 교착도 없다. 물체가 실제로 바뀐
+            # 경우는 _footprint_truncated 의 채택 상계가 풀어준다.
+            return
         if border:
             # 절단 마스크의 중심은 보이는 쪽으로 편향 — 편향을 불확실성으로
             # 흡수하고 extent는 갱신하지 않는다 (화면 진입/이탈 대응)
@@ -388,6 +451,9 @@ class PerceptionPipeline:
         """필터 (재)시드 — 시드 규약(승격 카운트·신선도·표시 재구성)의 단일 정의."""
         track.filter = TrackFilter(obb.center, log_ext)
         track.plane_constrained = constrained
+        # 풋프린트 기준도 함께 버린다 — 재시드는 "이 트랙이 무엇인지" 를 다시
+        # 정하는 사건이라 옛 기준을 물려받으면 새 관측이 영구 절단 판정된다.
+        track.area_ref = None
         track.n_accepted = 1
         track.last_accept_t = track.now
         track.obb = None  # 이전 시드의 표시 폐기 — update_obb가 새로 구성
