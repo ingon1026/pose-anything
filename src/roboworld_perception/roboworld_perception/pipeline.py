@@ -15,8 +15,8 @@ import cv2
 import numpy as np
 
 from .fusion import FLOW_STEP_STD, SYNC_STD, TrackFilter
-from .geometry import (compute_obb, fit_plane, mask_depth_to_points,
-                       masked_depth_median, obb_on_plane)
+from .geometry import (MAX_THICKNESS, compute_obb, fit_plane,
+                       mask_depth_to_points, masked_depth_median, obb_on_plane)
 from .tracker import IouTracker, depth_intrusion
 
 NOMINAL_DT = 1 / 15  # s — 공칭 프레임 주기 (스탬프 없을 때의 합성용)
@@ -327,6 +327,16 @@ class PerceptionPipeline:
         obb = (obb_on_plane(points, self.belt_plane)
                if self.belt_plane is not None else None)
         constrained = obb is not None
+        if constrained and obb.extent[2] > MAX_THICKNESS:
+            # 물리적으로 불가능한 두께 = 마스크가 물체가 아닌 것을 잡았다.
+            # 무구속으로 폴백하지 않고 이 프레임 관측을 통째로 버린다 — 같은
+            # 오염 점군의 무구속 OBB 도 쓰레기고, 폴백하면 규약이 뒤집혀
+            # 재시드까지 일어난다. 시드 시점에 들어온 값은 χ² 가 기각할 점프가
+            # 없어서 그대로 트랙의 진실이 된다(test5 실측: gray notebook 쓰레기
+            # 트랙이 두께 530mm 로 시드돼 중심이 265mm 틀린 채 8프레임 발행).
+            # 관측이 없으면 신선도 타이머가 흘러 발행이 멈추고, 키프레임 SAM
+            # 재검출은 그대로 살아 있어 마스크가 고쳐지면 자연 복구된다.
+            return
         if obb is None:
             obb = compute_obb(points)
         if obb is None:

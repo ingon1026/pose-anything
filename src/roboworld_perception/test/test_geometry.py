@@ -1,9 +1,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from roboworld_perception.geometry import (MIN_THICKNESS, compute_obb,
-                                           fit_plane, mask_depth_to_points,
-                                           match_axes, obb_on_plane)
+from roboworld_perception.geometry import (MAX_THICKNESS, MIN_THICKNESS,
+                                           compute_obb, fit_plane,
+                                           mask_depth_to_points, match_axes,
+                                           obb_on_plane)
 
 K = np.array([[600.0, 0, 320], [0, 600.0, 240], [0, 0, 1]])
 
@@ -132,3 +133,31 @@ def test_fit_plane_finds_belt_under_object():
     n, d = fit_plane(depth, K, mask=ring)
     assert abs(float(n @ BELT[0]) - 1.0) < 1e-3
     assert abs(d - 1.0) < 0.005
+
+
+# 실측 두께 (mm) — 상한을 건드릴 때 실제 물체가 죽는지 여기서 걸린다
+MEASURED_THICKNESS_MM = {
+    "isaac block": 58,      # 정렬 extent [193, 58, 50] — 두께가 폭보다 크다
+    "black bag": 217,       # [520, 377, 217] — 실측 정상 최대
+    "book": 43,             # [243, 190, 43]
+    "keyboard": 38,         # [402, 126, 38]
+    "gray notebook": 35,    # [180, 121, 35]
+    "thermos (누움)": 79,   # [273, 90, 79]
+    "thermos (세움)": 273,  # 가상 — 세우면 [79, 79, 273], 두께가 최장축이 된다
+}
+GARBAGE_THICKNESS_MM = 530  # test5 gray notebook 오검출
+
+
+def test_max_thickness_admits_every_measured_object():
+    """상한이 실측 물체를 하나도 죽이지 않는다.
+
+    "세운 thermos"가 이 표에 있는 이유: 비율 규칙(두께 ≤ 장축)으로 바꾸면
+    이 케이스가 곧바로 깨진다 — 이 프로젝트의 대표 프롬프트("물통")가 정확히
+    그 형상이다. 상한을 비율로 되돌리려는 리팩터는 여기서 실패해야 한다.
+    """
+    for name, mm in MEASURED_THICKNESS_MM.items():
+        assert mm / 1000 < MAX_THICKNESS, f"{name} 두께 {mm}mm 가 상한에 걸린다"
+
+
+def test_max_thickness_rejects_measured_garbage():
+    assert GARBAGE_THICKNESS_MM / 1000 > MAX_THICKNESS

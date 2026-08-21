@@ -139,3 +139,40 @@ def test_suppressed_flow_does_not_withhold_observations():
     assert t.fresh                     # 관측이 계속 들어왔다
     assert t.last_accept_t == 3 / 15   # 마지막 프레임까지 수락
     assert np.allclose(t.box, [100, 100, 180, 160])  # 마스크는 안 밀렸다
+def _plane_pipe():
+    """벨트를 z=1.0 에 고정한 평면 구속 파이프라인 (캘리브 노브로 직접 주입)."""
+    from roboworld_perception.pipeline import PerceptionPipeline
+    return PerceptionPipeline(StubDetector(), detect_interval=5,
+                              use_belt_plane=True,
+                              belt_plane=(np.array([0.0, 0.0, -1.0]), 1.0))
+
+
+def _run(pipe, obj_depth_mm):
+    """마스크 영역만 obj_depth_mm 인 장면을 여러 프레임 흘린다."""
+    K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
+    depth = np.full((240, 320), 1000, np.uint16)   # 벨트 z=1.0m
+    depth[100:160, 100:180] = obj_depth_mm
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(6):
+        pipe.process(rgb, depth, K, ["obj"])
+    return pipe.tracker.tracks[0]
+
+
+def test_impossible_thickness_never_seeds_a_track():
+    """물리적으로 불가능한 두께 관측은 트랙을 시드하지 못한다.
+
+    시드 시점에 들어온 값은 χ² 가 기각할 점프가 없어서 그대로 트랙의 진실이
+    된다 — test5 실측: gray notebook 쓰레기 트랙이 두께 530mm 로 시드돼
+    중심이 265mm 틀린 채 8프레임 발행됐다. publishable 은 pos_std 만 보고
+    크기를 안 보므로 발행 단계에서는 못 막는다.
+    """
+    track = _run(_plane_pipe(), 470)      # 벨트 1000mm - 470mm = 두께 530mm
+    assert track.filter is None           # 시드 자체가 안 됨
+    assert not track.publishable
+
+
+def test_normal_thickness_still_seeds():
+    """대조군 — 같은 경로로 정상 두께(50mm)는 그대로 시드·발행된다."""
+    track = _run(_plane_pipe(), 950)      # 두께 50mm
+    assert track.filter is not None
+    assert abs(float(track.filter.extent_sorted[2]) - 0.050) < 0.005
