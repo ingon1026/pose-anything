@@ -79,12 +79,36 @@ def status_text(fps, pipeline, objects):
 
 
 # ── 광학흐름 추적 ──────────────────────────────────────────
+# 흐름 일관성 게이트. 마스크가 물체와 가리개에 걸치면 LK 변위가 두 무리로
+# 갈라지는데, 중앙값만 쓰면 큰 쪽으로 조용히 끌려간다 — 그러면 마스크가 물체를
+# 떠나고, 떠난 마스크가 다음 프레임의 흐름을 다시 정하는 자기강화가 시작된다
+# (test4 book 실측 10.5~20.0s: 잔차가 171 -> 290mm 로 단조 증가, 발행 9.5초 단절.
+# 기각 잔차의 z 성분은 -0.6~-4.9mm 로 순수 면내 드리프트였다).
+#
+# 이 실패는 기존 신호로는 못 잡는다 — 가리개(검은 폴더)가 책과 같은 높이라
+# depth_intrusion 이 구조적으로 안 걸리고, SAM 점수는 부분 가림에서도 높다.
+# 마스크 안의 공간 구조가 그 둘과 독립인 유일한 신호다. 융합 게이트의 기각을
+# 신호로 쓰는 방법도 있지만 그건 증상이 나온 뒤이고, 무엇보다 기본 경로에서는
+# 그 관측이 애초에 수락된다(R̂ 이 커져 게이트가 넓다 — 실측 d²=6.1) — 그러면
+# 정작 오염 좌표를 발행하는 쪽을 못 고친다.
+#
+# 허용 반경을 변위 크기에 비례시키는 것이 요점이다. 절대 픽셀로만 재면
+# "빠른 물체"를 "여러 물체"로 오인한다 (test3 손밀기 137mm/s).
+FLOW_INLIER_PX = 2.0     # px — 정지 물체의 LK 잡음 허용치
+FLOW_INLIER_FRAC = 0.25  # 변위 크기에 비례하는 허용 반경
+FLOW_MIN_INLIER = 0.7    # 중앙값이 이 비율 이상의 점을 설명해야 전파한다.
+                         # 합성 실측(test_pipeline 의 텍스처 프레임): 한 덩어리
+                         # 흐름은 0~25px 전 속도에서 1.00, 마스크 절반만 움직이면
+                         # 0.60 — [0.60, 1.00] 이 고원이라 그 안이면 값이 둔감하다.
+                         # 실기 bag 스윕으로 재확인할 것
+
 
 def propagate_mask(prev_gray, gray, mask, box=None, max_points=300):
     """광학흐름 중앙값으로 마스크·박스 평행이동량 (dx, dy)를 구한다.
 
     box(xyxy)가 주어지면 그 ROI 안에서만 마스크 픽셀을 찾는다(전체 프레임
-    스캔 회피). 유효 포인트가 부족하면 None (이전 위치 유지).
+    스캔 회피). 유효 포인트가 부족하거나 변위가 한 덩어리로 일관되지
+    않으면 None (이전 위치 유지) — 위 FLOW_* 주석 참고.
     """
     if box is not None:
         x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
@@ -103,7 +127,11 @@ def propagate_mask(prev_gray, gray, mask, box=None, max_points=300):
     if ok.sum() < 10:
         return None
     d = (new_pts - pts).reshape(-1, 2)[ok]
-    return float(np.median(d[:, 0])), float(np.median(d[:, 1]))
+    med = np.median(d, axis=0)
+    r = max(FLOW_INLIER_PX, FLOW_INLIER_FRAC * float(np.hypot(*med)))
+    if np.mean(np.hypot(*(d - med).T) <= r) < FLOW_MIN_INLIER:
+        return None  # 마스크가 서로 다르게 움직이는 것들에 걸쳐 있다
+    return float(med[0]), float(med[1])
 
 
 def _shift_mask(mask, dx, dy):

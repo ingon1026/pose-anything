@@ -13,6 +13,17 @@ def textured_frame(shift=0):
     return frame
 
 
+def two_motion_frame(shift_a=0, shift_b=0):
+    """서로 다르게 움직이는 텍스처 두 장 — 마스크가 물체와 가리개에 걸친 상황."""
+    rng = np.random.default_rng(1)
+    frame = np.full((240, 320), 60, np.uint8)
+    frame[100:160, 100 + shift_a:140 + shift_a] = rng.integers(
+        0, 255, (60, 40), dtype=np.uint8)
+    frame[100:160, 140 + shift_b:180 + shift_b] = rng.integers(
+        0, 255, (60, 40), dtype=np.uint8)
+    return frame
+
+
 def test_propagate_mask_follows_motion():
     prev, cur = textured_frame(0), textured_frame(7)
     mask = np.zeros((240, 320), bool)
@@ -75,3 +86,56 @@ def test_plane_fit_is_attempted_only_once(monkeypatch):
         pipe.process(rgb, depth, K, ["obj"])
     assert pipe.belt_plane is None   # 실패 → 무구속 폴백
     assert len(tries) == 1           # 재시도 없음
+
+
+def test_flow_suppressed_when_mask_straddles_two_motions():
+    """마스크 절반이 가리개를 따라 움직이면 전파하지 않는다.
+
+    중앙값만 쓰면 큰 쪽으로 조용히 끌려가 마스크가 물체를 떠나고, 떠난
+    마스크가 다음 프레임의 흐름을 다시 정하는 자기강화가 시작된다
+    (test4 book 실측: 잔차 171 -> 290mm 단조 증가, 발행 9.5초 단절).
+    depth 도 score 도 이 상황을 못 잡는다 — 가리개가 같은 높이고 점수는 높다.
+    """
+    mask = np.zeros((240, 320), bool)
+    mask[100:160, 100:180] = True
+    prev, cur = two_motion_frame(0, 0), two_motion_frame(0, 12)
+    assert propagate_mask(prev, cur, mask) is None
+
+
+def test_fast_coherent_motion_still_propagates():
+    """빠른 물체를 여러 물체로 오인하면 안 된다 — 허용 반경이 변위 크기에
+    비례하는 이유 (test3 손밀기 137mm/s 구간)."""
+    mask = np.zeros((240, 320), bool)
+    mask[100:160, 100:180] = True
+    dx, dy = propagate_mask(textured_frame(0), textured_frame(14), mask)
+    assert abs(dx - 14) < 2.0
+    assert abs(dy) < 2.0
+
+
+def test_flow_suppression_carries_no_state():
+    """보류는 그 프레임의 영상만 보고 판정한다 — 한 번 걸렸다고 다음 프레임의
+    정상 흐름까지 막으면 교착이 된다."""
+    mask = np.zeros((240, 320), bool)
+    mask[100:160, 100:180] = True
+    assert propagate_mask(two_motion_frame(0, 0), two_motion_frame(0, 12),
+                          mask) is None
+    dx, _ = propagate_mask(textured_frame(0), textured_frame(7), mask)
+    assert abs(dx - 7) < 1.5
+
+
+def test_suppressed_flow_does_not_withhold_observations():
+    """전파를 보류해도 관측·융합은 계속한다 (교착 불가능성·신선도 보존).
+
+    보류가 관측까지 끊으면 T_STALE 이 흘러 발행이 멈추고, P 만 자라는 구간이
+    생겨 fusion 설계의 '거부 중에도 게이트가 스스로 열린다'가 무의미해진다.
+    """
+    pipe = PerceptionPipeline(StubDetector(), detect_interval=5)
+    K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
+    depth = np.full((240, 320), 1000, np.uint16)
+    for i in range(4):  # 0=키프레임, 1~3=흐름이 갈라지는 프레임
+        rgb = cv2.cvtColor(two_motion_frame(0, 12 * i), cv2.COLOR_GRAY2RGB)
+        pipe.process(rgb, depth, K, ["obj"], stamp_s=i / 15)
+    t = pipe.tracker.tracks[0]
+    assert t.fresh                     # 관측이 계속 들어왔다
+    assert t.last_accept_t == 3 / 15   # 마지막 프레임까지 수락
+    assert np.allclose(t.box, [100, 100, 180, 160])  # 마스크는 안 밀렸다
