@@ -11,6 +11,8 @@
  1. 거부가 이어지는 동안 수락 영역은 단조 증가 (교착 불가능)
  2. R̂은 게이트를 통과한 관측만으로 갱신되고 하한(물리 모델) 밑으로 못 내려간다
  3. 탈출 시간은 편차에 단조 — 큰 편차(가리개)일수록 오래 거부된다
+ 4. extent 기각 탈출은 유한이 아니라 **상계**다 — 일관된 키프레임 관측
+    LE_REJECT_STREAK 회 안에 반드시 열린다 (P 성장만으로는 수천 초)
 """
 import numpy as np
 
@@ -33,6 +35,13 @@ R_LOGE_FLOOR = 0.05
 # 554mm 침입은 pooled d²≈31 > χ²로 기각된다 (property test로 고정).
 RHAT_CAP = 2500.0    # 분산 배율 (σ로는 50×)
 RHAT_ALPHA = 0.05    # R̂ EMA 이득
+# extent 기각 상계. Ple 성장(Q_LOGE)만으로 게이트가 열리기를 기다리면 편차가
+# 클 때 수천 초가 걸린다 — 유한하지만 상계가 없다(2026-08-20 실측 추정
+# 6,800 s: 그동안 위치는 정상 수락되어 발행이 계속되므로 기존 회귀 지표에
+# 안 잡힌다). 서로 일관된 기각 관측이 이 횟수만큼 연속되면 그쪽을 진실로
+# 보고 재시드해 탈출 시간을 "키프레임 N 회"로 상계 짓는다. "일관"을
+# 요구하는 것이 요점 — 흔들리는 오염 blob 은 이 경로로 못 들어온다.
+LE_REJECT_STREAK = 3
 # 프레임별 가산 측정잡음(r_extra)의 재료 — R 모델 상수는 전부 이 모듈에 둔다:
 SYNC_STD = 0.011     # s — color/depth 짝짓기 시차 p95 (test2/4/5 실측 11ms)
 FLOW_STEP_STD = 0.002  # m/프레임 — 키프레임 이후 LK 누적 드리프트 (test2 실측)
@@ -55,6 +64,7 @@ class TrackFilter:
         # R̂은 물체별 잡음 규모(실측 40× 편차)를 따라가는 보조 채널이다.
         self.rhat_pos = np.full(3, R_POS_FLOOR ** 2)
         self.rhat_le = np.full(3, R_LOGE_FLOOR ** 2)
+        self._le_rej = []   # 연속 기각된 키프레임 extent 관측 (상계 백스톱용)
 
     # ── 예측 ──────────────────────────────────────────────
     def predict(self, dt):
@@ -92,14 +102,21 @@ class TrackFilter:
             R_POS_FLOOR ** 2, RHAT_CAP * R_POS_FLOOR ** 2)
         return True
 
-    def fuse_extent(self, log_e):
-        """정렬 log-extent 관측 (3,). 반환: 수락 여부."""
+    def fuse_extent(self, log_e, may_reseed=False):
+        """정렬 log-extent 관측 (3,). 반환: 수락 여부.
+
+        may_reseed: 이 관측이 재시드(LE_REJECT_STREAK 상계)의 자격이 있는가.
+        호출자는 "SAM 재검출(키프레임) ∧ 같은 프레임의 위치 관측이 수락됨"일
+        때만 켤 것 — flow 프레임은 같은 마스크의 전파라 독립 증거가 아니고
+        (승격 카운트와 같은 규칙), 위치가 기각된 프레임의 마스크는 물체를
+        떠나 있을 수 있어 그 크기로 트랙을 덮어쓰면 파지 폭이 틀어진다.
+        """
         le = np.asarray(log_e, float)
         nu = le - self.le
         P_prior = self.Ple.copy()
         S = P_prior + self.rhat_le
         if float(np.sum(nu * nu / S)) > CHI2_3DOF:
-            return False
+            return self._reseed_le(le) if may_reseed else False
         K = self.Ple / S
         self.le += K * nu
         self.Ple *= (1 - K)
@@ -107,6 +124,21 @@ class TrackFilter:
         self.rhat_le = np.clip(
             (1 - RHAT_ALPHA) * self.rhat_le + RHAT_ALPHA * inno2,
             R_LOGE_FLOOR ** 2, RHAT_CAP * R_LOGE_FLOOR ** 2)
+        self._le_rej.clear()
+        return True
+
+    def _reseed_le(self, le):
+        """기각 관측 누적 → 상계 도달 시 log-extent 재시드. 반환: 재시드 여부."""
+        self._le_rej = self._le_rej[-(LE_REJECT_STREAK - 1):] + [le]
+        if len(self._le_rej) < LE_REJECT_STREAK:
+            return False
+        a = np.asarray(self._le_rej)
+        if np.any(a.max(0) - a.min(0) > 3.29 * R_LOGE_FLOOR):
+            return False   # 기각 관측끼리도 안 맞는다 — 재시드할 진실이 없음
+        self.le = a.mean(0)
+        self.Ple = np.full(3, R_LOGE_FLOOR ** 2 * 25)
+        self.rhat_le = np.full(3, R_LOGE_FLOOR ** 2)
+        self._le_rej.clear()
         return True
 
     # ── 소비자 뷰 ─────────────────────────────────────────

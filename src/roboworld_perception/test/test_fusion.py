@@ -5,7 +5,7 @@
 """
 import numpy as np
 
-from roboworld_perception.fusion import TrackFilter
+from roboworld_perception.fusion import LE_REJECT_STREAK, TrackFilter
 
 DT = 1 / 15  # 공칭 프레임 주기
 
@@ -138,3 +138,44 @@ def test_extent_shrink_not_absorbing():
     # 미세 축소(정상 잡음)는 수락
     f.predict(DT)
     assert f.fuse_extent(np.log((0.299, 0.199, 0.0499)))
+
+
+# ── extent 기각 탈출의 상계 (불변식 4) ─────────────────────
+
+def test_extent_escape_is_bounded_by_keyframes():
+    """P 성장만으로 열리기를 기다리면 큰 편차에서 수천 초가 걸린다 —
+    유한하지만 상계가 없다(2026-08-20 실측 추정 6,800s: 그동안 위치는
+    정상 수락되어 발행이 계속되므로 flips=0 류 지표에 안 잡힌다).
+    일관된 키프레임 관측이면 LE_REJECT_STREAK 회 안에 반드시 열린다."""
+    f = make()
+    truth = np.log((0.30, 0.20, 0.20))  # 두께 5cm -> 20cm (구속 전후 규약 차)
+    for i in range(1, 50):
+        f.predict(DT)
+        if f.fuse_extent(truth, may_reseed=True):
+            assert i <= LE_REJECT_STREAK
+            assert np.allclose(f.extent_sorted, (0.30, 0.20, 0.20), rtol=0.02)
+            return
+    raise AssertionError("상계 안에 게이트가 열리지 않았다")
+
+
+def test_flow_frames_never_reseed_extent():
+    """flow 프레임은 같은 마스크의 전파라 독립 증거가 아니다 — 자기 확인으로
+    크기를 바꿔 쓸 수 있으면 승격 카운트 규칙(F4)이 뒷문으로 뚫린다."""
+    f = make()
+    truth = np.log((0.30, 0.20, 0.20))
+    for _ in range(50):
+        f.predict(DT)
+        assert not f.fuse_extent(truth)
+    assert np.allclose(f.extent_sorted, (0.30, 0.20, 0.05), rtol=0.05)
+
+
+def test_inconsistent_rejects_do_not_reseed():
+    """흔들리는 오염 blob 은 이 경로로 못 들어온다 — 재시드 조건이
+    '연속'이 아니라 '연속 + 서로 일관'인 이유."""
+    f = make()
+    rng = np.random.default_rng(0)
+    for _ in range(60):
+        f.predict(DT)
+        f.fuse_extent(np.log((0.30, 0.20, 0.20)) + rng.normal(0, 0.5, 3),
+                      may_reseed=True)
+    assert f.extent_sorted[2] < 0.10  # 원래 5cm 유지 (20cm 로 안 끌려감)
