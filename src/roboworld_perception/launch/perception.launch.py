@@ -23,7 +23,12 @@ def generate_launch_description():
         DeclareLaunchArgument("sync_slop", default_value="0.05"),
         DeclareLaunchArgument("sync_queue_size", default_value="5"),
         DeclareLaunchArgument("publish_score_min", default_value="0.0"),
-        DeclareLaunchArgument("enable_merge", default_value="false"),
+        DeclareLaunchArgument("enable_merge", default_value="true"),
+        # 아래 둘은 2026-08-21 도입, 실측 근거는 docs/belt_plane_2026-08-21.md
+        # 와 docs/footprint_gate_2026-08-21.md. 둘 다 기본 켜짐이고, 끄면
+        # 그날 이전 동작으로 돌아간다.
+        DeclareLaunchArgument("use_belt_plane", default_value="true"),
+        DeclareLaunchArgument("enable_footprint_gate", default_value="true"),
         DeclareLaunchArgument("image_size", default_value="0"),
         # Isaac Sim 이 이미지를 직접 발행하면 RealSense 드라이버가 없어
         # camera_link -> camera_color_optical_frame 이 비므로 여기서 켠다.
@@ -67,6 +72,11 @@ def generate_launch_description():
                     LaunchConfiguration("publish_score_min"), value_type=float),
                 "enable_merge": ParameterValue(
                     LaunchConfiguration("enable_merge"), value_type=bool),
+                "use_belt_plane": ParameterValue(
+                    LaunchConfiguration("use_belt_plane"), value_type=bool),
+                "enable_footprint_gate": ParameterValue(
+                    LaunchConfiguration("enable_footprint_gate"),
+                    value_type=bool),
                 "image_size": ParameterValue(
                     LaunchConfiguration("image_size"), value_type=int),
                 "publish_optical_tf": ParameterValue(
