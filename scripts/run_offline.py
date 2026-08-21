@@ -142,6 +142,9 @@ def main():
                          "그 정책을 bag 으로 재현하려면 같은 값을 줄 것")
     ap.add_argument("--detect-interval", type=int, default=5,
                     help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
+    ap.add_argument("--footprint-gate", action="store_true",
+                    help="부분 가림(풋프린트 절단) 관측 기각 켜기 (기본 꺼짐 — "
+                         "docs/footprint_gate_2026-08-21.md 의 물체별 표 참고)")
     ap.add_argument("--belt-plane-on", action="store_true",
                     help="벨트 평면 구속 OBB 켜기 (기본 꺼짐 — 관례는 "
                          "PerceptionPipeline.use_belt_plane 주석 참고)")
@@ -170,6 +173,7 @@ def main():
         pub_score_min=args.publish_score_min,
         enable_merge=args.enable_merge,
         use_belt_plane=args.belt_plane_on,
+        enable_footprint_gate=args.footprint_gate,
         belt_plane=parse_plane(args.belt_plane))
 
     writer = None

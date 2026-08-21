@@ -157,6 +157,12 @@ def _touches_border(mask):
 # 필터의 extent 로는 못 잡는다. 프레임당 변화가 3mm 라 χ² 를 매번 통과하고,
 # 통과할 때마다 extent 상태가 따라 내려가 다음 프레임의 기준이 된다 — 천 번의
 # 작은 베임이다. 그래서 **드리프트보다 훨씬 느린 기준**을 따로 둔다.
+# **기본 꺼짐** (enable_merge·use_belt_plane 과 같은 관례). 실측으로 물체
+# 형상에 따라 이득과 손해가 갈린다 — docs/footprint_gate_2026-08-21.md 의
+# 표를 보고 씬별로 켤 것. 요약: 뭉툭한 물체(book·notebook)는 오염 발행이
+# 17%->0%, 19%->5% 로 사라지지만, 세장 물체(keyboard 402x126mm)는 어느
+# 문턱에서도 악화한다(4%->22~39%). 면적 하나로 보므로 세장 물체는 한 축만
+# 잘려도 면적이 크게 변하는 것이 원인으로 보인다.
 FOOTPRINT_TAU = 0.14     # |log(면적/기준)| 이 넘으면 절단 관측으로 본다.
                          # 실측 고원 [0.10, 0.20] 의 로그 중점(KAPPA_PHYS·
                          # TAU_EXT 와 같은 산출). 0.08 은 정상 프레임 오탐이
@@ -212,7 +218,8 @@ class PerceptionPipeline:
     def __init__(self, detector, depth_scale=0.001, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1, pub_score_min=0.0, enable_merge=False,
-                 belt_plane=None, use_belt_plane=False):
+                 belt_plane=None, use_belt_plane=False,
+                 enable_footprint_gate=False):
         self.detector = detector
         self.depth_scale = depth_scale
         self.rot_alpha = rot_alpha
@@ -234,6 +241,8 @@ class PerceptionPipeline:
         self.belt_plane = belt_plane
         self._plane_fixed = belt_plane is not None
         self._plane_tried = False
+        # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
+        self.enable_footprint_gate = enable_footprint_gate
         self._frame_idx = 0
         self._prev_gray = None
         self._last_stamp = None
@@ -245,6 +254,8 @@ class PerceptionPipeline:
         if not self._plane_fixed:
             self.belt_plane = None
             self._plane_tried = False
+        # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
+        self.enable_footprint_gate = enable_footprint_gate
         self._frame_idx = 0
         self._prev_gray = None
         self._last_stamp = None
@@ -413,7 +424,9 @@ class PerceptionPipeline:
         # 가리개에 의한 절단도 화면 절단과 같은 사건이다 — 보이는 부분의
         # 중심은 물체의 중심이 아니다. 판정은 화면 경계와 무관하므로 먼저
         # 부르고(기준 EMA 가 매 프레임 돌아야 한다), 처리는 border 와 합친다.
-        if _footprint_truncated(track, obb)[0]:
+        # 기준 EMA 는 게이트가 꺼져 있어도 매 프레임 돌려야 한다 — 켜는
+        # 순간부터 기준이 유효하려면 항상 따라가고 있어야 하고, 부작용이 없다.
+        if _footprint_truncated(track, obb)[0] and self.enable_footprint_gate:
             # 가리개에 잘린 관측 — 보이는 부분의 중심은 물체의 중심이 아니다.
             # depth 침입과 같은 처리로 **관측을 통째로 버린다**. 화면 절단처럼
             # r_extra 로 흡수하지 않는 이유: 불확실성을 키우면 게이트가 함께

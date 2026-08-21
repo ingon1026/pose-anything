@@ -202,7 +202,7 @@ def test_partial_occlusion_does_not_move_state():
     상태가 따라 내려가 다음 프레임의 기준이 된다(천 번의 작은 베임).
     실측 test4 book: 풋프린트 290x241 -> 267x170mm 동안 중심이 14 -> 95mm.
     """
-    pipe = PerceptionPipeline(NoDetector())
+    pipe = PerceptionPipeline(NoDetector(), enable_footprint_gate=True)
     t = seeded_track(pipe)
     x_before = float(t.filter.center[0])
     for _ in range(10):                      # 절반쯤 덮인 관측만 계속
@@ -220,7 +220,7 @@ def test_partial_occlusion_escape_is_bounded():
     관용구는 여기서 못 쓴다 — 매끄러운 드리프트는 언제나 자기들끼리 일관해서
     그 탈출구로 그냥 걸어 들어온다(실측: 검출이 72% -> 14% 로 무너졌다).
     """
-    pipe = PerceptionPipeline(NoDetector())
+    pipe = PerceptionPipeline(NoDetector(), enable_footprint_gate=True)
     t = seeded_track(pipe)
     accepted = None
     for i in range(300):
@@ -236,7 +236,7 @@ def test_partial_occlusion_escape_is_bounded():
 
 def test_small_footprint_wobble_still_accepted():
     """TAU 안의 정상 크기 요동은 그대로 수락된다 (게이트가 과민하지 않다)."""
-    pipe = PerceptionPipeline(NoDetector())
+    pipe = PerceptionPipeline(NoDetector(), enable_footprint_gate=True)
     t = seeded_track(pipe)
     for cover in (0, 3, 0, 4, 0, 3):        # 면적 ~5% 요동 (TAU=0.14 안)
         t.mask, depth = make_partial(1000, cover)
