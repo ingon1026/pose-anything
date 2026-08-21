@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "roboworld_
 from rosbags.highlevel import AnyReader  # noqa: E402
 
 from roboworld_perception.pipeline import (CSV_HEADER, csv_row,  # noqa: E402
-                                           img_to_np, status_text)
+                                           img_to_np, parse_plane,
+                                           status_text)
 
 COLOR = "/camera/camera/color/image_raw"
 DEPTH = "/camera/camera/aligned_depth_to_color/image_raw"
@@ -141,6 +142,11 @@ def main():
                          "그 정책을 bag 으로 재현하려면 같은 값을 줄 것")
     ap.add_argument("--detect-interval", type=int, default=5,
                     help="SAM 검출 주기 (1=매 프레임, N=키프레임+광학흐름 추적)")
+    ap.add_argument("--belt-plane-on", action="store_true",
+                    help="벨트 평면 구속 OBB 켜기 (기본 꺼짐 — 관례는 "
+                         "PerceptionPipeline.use_belt_plane 주석 참고)")
+    ap.add_argument("--belt-plane", default="",
+                    help="벨트 평면 a,b,c,d (n·p+d=0). 생략하면 첫 프레임에서 추정")
     ap.add_argument("--raw", action="store_true",
                     help="평활 전 raw OBB를 {tag}_raw.csv로 추가 기록 "
                          "(측정 잡음 보정용 — 발행 CSV는 EMA·slerp 통과 후 값)")
@@ -162,7 +168,9 @@ def main():
         detect_interval=args.detect_interval,
         max_per_prompt=args.max_per_prompt,
         pub_score_min=args.publish_score_min,
-        enable_merge=args.enable_merge)
+        enable_merge=args.enable_merge,
+        use_belt_plane=args.belt_plane_on,
+        belt_plane=parse_plane(args.belt_plane))
 
     writer = None
     rows = []
@@ -170,6 +178,7 @@ def main():
     raw_f = None
     if args.raw:
         from roboworld_perception.geometry import (compute_obb, match_axes,
+                                                   obb_on_plane,
                                                    mask_depth_to_points,
                                                    masked_depth_median)
         raw_f = open(out_dir / f"{tag}_raw.csv", "w", newline="")
@@ -196,8 +205,15 @@ def main():
                         continue  # 정상 관측만 — 잡음 보정에 오염 프레임 배제
                     # depth_scale은 반드시 파이프라인과 동일하게 — 이 CSV가
                     # 필터 상수(SIGMA_A·R 하한) 보정의 근거 데이터다
-                    robb = compute_obb(mask_depth_to_points(
-                        o.mask, depth, K, depth_scale=pipeline.depth_scale))
+                    # 필터가 실제로 보는 관측과 같은 규약이어야 한다 —
+                    # 평면 구속 중에 무구속 OBB를 기록하면 이 CSV로 보정한
+                    # 상수가 파이프라인과 어긋난다
+                    rpts = mask_depth_to_points(
+                        o.mask, depth, K, depth_scale=pipeline.depth_scale)
+                    robb = (obb_on_plane(rpts, pipeline.belt_plane)
+                            if pipeline.belt_plane is not None else None)
+                    if robb is None:
+                        robb = compute_obb(rpts)
                     if robb is None:
                         continue
                     prev = raw_prev_R.get(o.track_id)

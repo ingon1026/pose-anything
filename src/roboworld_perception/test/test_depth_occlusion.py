@@ -140,3 +140,26 @@ def test_persistent_size_change_eventually_adapts():
         if np.exp(t.filter.le[0]) > 1.5 * e1_before:
             break
     assert np.exp(t.filter.le[0]) > 1.5 * e1_before  # 새 크기로 수렴 시작
+
+
+def test_thick_object_top_surface_is_not_intrusion():
+    """침입 판정의 기준선은 물체 중심이 아니라 **상면**이어야 한다.
+
+    비교 대상 z 는 masked_depth_median, 즉 보이는 면의 depth 다. 벨트 평면
+    구속 이후 filter.center 는 상면보다 h/2 만큼 멀어져서, 중심과 비교하면
+    정상 검출이 매 프레임 "가까운 것"으로 보인다. 통계 절(3.29σ, σ≈2mm)은
+    h/2≈15mm 면 이미 통과하므로 물리 절(0.9·z) 하나만 남는데, 실측
+    black bag 이 h/2 = 0.083~0.097·z 로 그 문턱에 붙어 있다 — 두께 20cm 면
+    넘는다. 넘으면 영구 가림 판정 → flow 보류 → 발행 중단이다.
+    """
+    from conftest import make_filtered_track
+    from roboworld_perception.geometry import ObbResult
+    from roboworld_perception.tracker import depth_intrusion
+    z_center, thk = 0.9, 0.20
+    t = make_filtered_track(z=z_center, extent=(0.44, 0.30, thk))
+    t.obb = ObbResult(center=t.filter.center.copy(),
+                      extent=np.array([0.44, 0.30, thk]),
+                      R=np.eye(3), num_points=100)
+    assert abs(t.surface_z - (z_center - thk / 2)) < 1e-6
+    assert not depth_intrusion(t, t.surface_z)        # 정상 검출
+    assert depth_intrusion(t, t.surface_z - 0.2)      # 진짜 가리개

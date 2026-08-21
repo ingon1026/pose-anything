@@ -15,7 +15,8 @@ import cv2
 import numpy as np
 
 from .fusion import FLOW_STEP_STD, SYNC_STD, TrackFilter
-from .geometry import compute_obb, mask_depth_to_points, masked_depth_median
+from .geometry import (compute_obb, fit_plane, mask_depth_to_points,
+                       masked_depth_median, obb_on_plane)
 from .tracker import IouTracker, depth_intrusion
 
 NOMINAL_DT = 1 / 15  # s — 공칭 프레임 주기 (스탬프 없을 때의 합성용)
@@ -34,6 +35,18 @@ def csv_row(obj, stamp_s, proc_ms):
             *[f"{v:.4f}" for v in o.center], f"{o.distance:.4f}",
             *[f"{v:.4f}" for v in o.extent],
             f"{r:.2f}", f"{p:.2f}", f"{y:.2f}", obj.flip_count, f"{proc_ms:.1f}"]
+
+
+def parse_plane(text):
+    """"a,b,c,d" (n·p+d=0) → (n, d), |n|=1. 빈 문자열이면 None(자동 추정).
+
+    오프라인 러너와 ROS 노드가 같은 문자열 규약을 쓰게 하는 단일 정의.
+    """
+    if not text:
+        return None
+    v = np.array([float(x) for x in text.split(",")], dtype=float)
+    s = np.linalg.norm(v[:3])
+    return v[:3] / s, float(v[3]) / s
 
 
 def img_to_np(msg):
@@ -105,10 +118,24 @@ def _touches_border(mask):
                 or mask[:, 0].any() or mask[:, -1].any())
 
 
+def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
+    """검출 마스크 바로 바깥의 링에서 지지면(벨트)을 맞춘다.
+
+    화면 전체로 맞추면 지배 평면 = 바닥이 이긴다(fit_plane 주석 참고).
+    링은 정의상 "물체가 얹힌 면"이라 물체가 어디 있든 옳은 면을 고른다.
+    """
+    union = np.zeros(depth.shape, np.uint8)
+    for d in detections:
+        union |= d["mask"].astype(np.uint8)
+    ring = cv2.dilate(union, np.ones((ring_px, ring_px), np.uint8)) & ~union
+    return fit_plane(depth, K, depth_scale, mask=ring.astype(bool))
+
+
 class PerceptionPipeline:
     def __init__(self, detector, depth_scale=0.001, rot_alpha=0.15,
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
-                 max_per_prompt=1, pub_score_min=0.0, enable_merge=False):
+                 max_per_prompt=1, pub_score_min=0.0, enable_merge=False,
+                 belt_plane=None, use_belt_plane=False):
         self.detector = detector
         self.depth_scale = depth_scale
         self.rot_alpha = rot_alpha
@@ -119,6 +146,17 @@ class PerceptionPipeline:
                                   pub_score_min=pub_score_min,
                                   enable_merge=enable_merge)
         self.detect_interval = max(1, detect_interval)
+        # 벨트 평면 (n, d). 고정 카메라라 상수 — 첫 성공 후 캐시한다.
+        # 미리 주면(캘리브 노브) 그 값으로 고정하고 다시 맞추지 않는다.
+        # 기본 꺼짐: Isaac 정답 대비 두께 +0.7mm·중심 +0.4mm 로 검증됐지만,
+        # 실기 test4 에서 가림 중 book 발행이 105 -> 8 프레임으로 줄었다
+        # (관측이 정밀해져 R̂ 이 하한으로 내려가 χ² 게이트가 좁아진 대가 —
+        # LK 마스크 드리프트를 즉시 기각한다). enable_merge·pub_score_min 과
+        # 같은 관례로, 씬별로 켜서 쓴다.
+        self.use_belt_plane = use_belt_plane
+        self.belt_plane = belt_plane
+        self._plane_fixed = belt_plane is not None
+        self._plane_tried = False
         self._frame_idx = 0
         self._prev_gray = None
         self._last_stamp = None
@@ -127,6 +165,9 @@ class PerceptionPipeline:
 
     def reset(self):
         self.tracker.reset()
+        if not self._plane_fixed:
+            self.belt_plane = None
+            self._plane_tried = False
         self._frame_idx = 0
         self._prev_gray = None
         self._last_stamp = None
@@ -168,6 +209,30 @@ class PerceptionPipeline:
 
     def _detect_frame(self, rgb, depth, K, prompts, stamp_s):
         detections = self.detector.detect(rgb, prompts)
+        if self.use_belt_plane and self.belt_plane is None \
+                and not self._plane_tried:
+            # 링은 반드시 **고점수 검출**로만 만든다. detect()는 연관용
+            # 저점수(assoc_threshold=0.1)까지 돌려주는데, 오검출 주변의 링은
+            # 물체가 얹힌 면이 아니라 아무 면이나 준다 — test3 실측: 검출
+            # 28개로 링을 만들면 depth 가 0.91~1.73m 로 퍼져 RANSAC 인라이어가
+            # 0.14 까지 떨어져 추정이 통째로 실패했다.
+            thr = getattr(self.detector, "threshold", 0.0)
+            strong = [d for d in detections if d["score"] >= thr]
+            if strong:
+                # 검출이 처음 생긴 키프레임에서 **한 번만** 시도한다. 고정
+                # 카메라에서 지지면은 상수이므로 여기서 못 잡으면 그 씬은
+                # 평면 가정이 안 맞는 것이다. 계속 재시도하면 물체가 이동해
+                # 링이 달라진 어느 프레임에서 우연히 문턱을 넘고, 그 나쁜
+                # 평면이 영구 캐시된다 — test3 실측: 18회 실패 후 19번째에
+                # 통과한 평면으로 pink block 발행이 336 -> 168 프레임,
+                # size_std 가 6.7 -> 104.9mm 로 파탄났다.
+                self._plane_tried = True
+                self.belt_plane = _fit_support_plane(strong, depth, K,
+                                                     self.depth_scale)
+            # 단발 추정 후 영구 캐시다. 조용히 틀린 평면은 두께·중심 z 로만
+            # 드러나 원인을 평면에서 찾지 않게 된다 — 한 줄이라도 남긴다.
+            print(f"[belt_plane] {self.belt_plane}" if self.belt_plane
+                  else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행")
         for d in detections:  # 매칭 비용(depth 충돌 배제)이 쓸 depth를 1회만 계산
             d["z"] = masked_depth_median(d["mask"], depth, self.depth_scale,
                                          d["box"])
@@ -229,12 +294,26 @@ class PerceptionPipeline:
             return  # 절단 관측으로 시드하지 않음 — 점군·OBB 계산(≈10ms)도 생략
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
-        obb = compute_obb(points)
+        # 벨트 평면 구속이 성립하면 그쪽이 진짜 두께·중심을 준다. 기울어
+        # 놓인 물체에서는 obb_on_plane 이 None 을 내고 무구속으로 폴백한다.
+        obb = (obb_on_plane(points, self.belt_plane)
+               if self.belt_plane is not None else None)
+        constrained = obb is not None
+        if obb is None:
+            obb = compute_obb(points)
         if obb is None:
             return
         log_ext = np.log(np.sort(obb.extent)[::-1] + 1e-9)
         if track.filter is None:
-            self._seed_filter(track, obb, log_ext)
+            self._seed_filter(track, obb, log_ext, constrained)
+            return
+        if constrained != track.plane_constrained:
+            # 규약이 바뀌면 중심은 h/2, 두께는 log 로 수십 배 점프한다 —
+            # 한 트랙 안에서 두 규약을 섞으면 정직한 관측이 영구 기각된다.
+            # 키프레임에서만 새 규약으로 재시드하고(승격 3회 다시 벌어야
+            # 발행), flow 프레임의 불일치 관측은 버린다.
+            if self.last_was_keyframe:
+                self._seed_filter(track, obb, log_ext, constrained)
             return
         f = track.filter
         speed = float(np.linalg.norm(f.v))
@@ -248,8 +327,13 @@ class PerceptionPipeline:
             # 절단 마스크의 중심은 보이는 쪽으로 편향 — 편향을 불확실성으로
             # 흡수하고 extent는 갱신하지 않는다 (화면 진입/이탈 대응)
             r_extra += (float(f.extent_sorted[0]) / 4) ** 2
-        ok_ext = f.fuse_extent(log_ext) if not border else False
-        if f.fuse_pos(obb.center, r_extra):
+        # 위치를 먼저 융합한다 — 위치/extent 는 분리된 블록이라 순서가 결과를
+        # 바꾸지 않고, extent 재시드가 "이 프레임 마스크가 진짜 물체 위에
+        # 있었는가"를 위치 수락으로 확인할 수 있게 된다.
+        ok_pos = f.fuse_pos(obb.center, r_extra)
+        ok_ext = (f.fuse_extent(log_ext, self.last_was_keyframe and ok_pos)
+                  if not border else False)
+        if ok_pos:
             if self.last_was_keyframe:
                 # 승격 카운트는 SAM 재검출(키프레임)만 — flow 프레임은 같은
                 # 마스크의 전파라 독립 증거가 아니다 (자기 확인 승격 방지)
@@ -260,11 +344,12 @@ class PerceptionPipeline:
             # 미승격 트랙의 기각 관측(키프레임)은 거부 대신 재시드 — 오염
             # blob으로 시드된 필터에 정직한 관측이 수십 초 잠기는 것을 방지.
             # 승격에는 결과적으로 "연속 일관 관측 3회"가 필요해진다 (F4 강화).
-            self._seed_filter(track, obb, log_ext)
+            self._seed_filter(track, obb, log_ext, constrained)
 
-    def _seed_filter(self, track, obb, log_ext):
+    def _seed_filter(self, track, obb, log_ext, constrained=False):
         """필터 (재)시드 — 시드 규약(승격 카운트·신선도·표시 재구성)의 단일 정의."""
         track.filter = TrackFilter(obb.center, log_ext)
+        track.plane_constrained = constrained
         track.n_accepted = 1
         track.last_accept_t = track.now
         track.obb = None  # 이전 시드의 표시 폐기 — update_obb가 새로 구성

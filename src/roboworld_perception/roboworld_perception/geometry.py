@@ -122,6 +122,111 @@ def compute_obb(points, voxel=0.005):
                      R=R, num_points=len(pcd.points))
 
 
+# ── 벨트 평면 구속 ────────────────────────────────────────
+# 하방 카메라는 물체의 상면만 본다. 그래서 무구속 OBB 는 두께가 0 으로
+# 붕괴하고(점군이 사실상 한 장의 면), 중심이 물체 중심이 아니라 상면에
+# 얹힌다 — 광축 방향 계통 편향 -3.69 mm 의 정체다(2026-08-20 축 분해 실측:
+# 위치 오차 에너지의 51 % 가 광축). 벨트 평면을 알면 두께 = 상면 높이,
+# 중심 = 상면과 벨트의 중간으로 두 결함이 동시에 풀린다.
+TILT_MAX_DEG = 25.0    # 상면 법선이 벨트 법선에서 이만큼 벌어지면 구속 포기
+PLANAR_RATIO = 0.05    # λ0/λ1 이 이보다 작으면 "면 한 장만 보이는" 점군
+MIN_THICKNESS = 0.003  # m — log-extent 하한. 평면 추정 오차로 두께가 0/음수가
+                       # 되면 log 가 폭발해 필터가 수천 초 동결된다(2026-08-20).
+
+
+def _backproject(depth, K, depth_scale, stride, z_range, mask=None):
+    if mask is None:
+        h, w = depth.shape
+        ys, xs = np.mgrid[0:h:stride, 0:w:stride]
+        ys, xs = ys.ravel(), xs.ravel()
+    else:
+        ys, xs = np.nonzero(mask)
+        ys, xs = ys[::stride], xs[::stride]
+    z = depth[ys, xs].astype(np.float64)
+    if depth.dtype != np.float32 and depth.dtype != np.float64:
+        z *= depth_scale
+    ok = (z > z_range[0]) & (z < z_range[1])
+    z, ys, xs = z[ok], ys[ok], xs[ok]
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    return np.column_stack([(xs - cx) * z / fx, (ys - cy) * z / fy, z])
+
+
+def fit_plane(depth, K, depth_scale=0.001, mask=None, stride=2,
+              z_range=(0.10, 3.0), dist_thresh=0.006, min_inlier_ratio=0.3,
+              band=0.050):
+    """지지 평면(= 물체가 놓인 벨트면) → (n, d), n·p + d = 0, |n| = 1.
+
+    n 은 카메라 쪽을 향한다(광학 좌표계에서 n[2] < 0). 인라이어가
+    min_inlier_ratio 미만이면 None — 잘못된 평면을 쓰느니 무구속이 낫다.
+    고정 카메라에서는 사실상 상수라 파이프라인이 한 번 맞추고 캐시한다.
+
+    mask 로 픽셀을 한정할 것. 화면 전체를 넣으면 RANSAC 이 "지배 평면"을
+    고르는데 그건 벨트가 아니라 바닥이다 — 실측(isaac_belt_moving): 벨트가
+    화면의 일부뿐이라 바닥이 이겨 두께가 24 mm 대신 569 mm 로 나왔다.
+    물체 마스크 바로 바깥의 링을 쓰면 "물체가 실제로 얹힌 면"을 잰다.
+
+    링이라도 물체 상면·배경이 섞여 들어온다. depth 중앙값 ±band 로 먼저
+    쳐내야 인라이어 비율이 "지지면 안에서의 비율"이 된다 — 안 쳐내면 실측
+    test2 가 0.28 로 문턱 바로 아래에서 탈락했다(평면 자체는 맞았는데도).
+    클립 후 test2 0.42 / test4 0.41 로 통과하고, test3(손밀기 롤러)은 0.27 로
+    떨어진다. test3 은 실제로 링이 한 장의 평면이 아니라 추정 파라미터에 따라
+    기울기가 2.9~8.2° 로 흔들리는 씬이라, 여기서 걸러지는 것이 의도한 동작이다.
+    """
+    pts = _backproject(depth, K, depth_scale, stride, z_range, mask)
+    if len(pts) < 500:
+        return None
+    z = pts[:, 2]
+    pts = pts[np.abs(z - np.median(z)) < band]
+    if len(pts) < 500:
+        return None
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+    model, inliers = pcd.segment_plane(dist_thresh, 3, 200)
+    if len(inliers) < min_inlier_ratio * len(pts):
+        return None
+    n, d = np.asarray(model[:3], float), float(model[3])
+    if n[2] > 0:
+        n, d = -n, -d
+    return n, d
+
+
+def obb_on_plane(points, plane, min_thickness=MIN_THICKNESS, top_q=0.98,
+                 tilt_max_deg=TILT_MAX_DEG):
+    """벨트 평면에 구속한 OBB — 회전 자유도는 법선 둘레 yaw 하나뿐.
+
+    물체가 벨트에 평평하게 놓였다는 가정 위에서만 성립한다. 상면 한 장만
+    보이는 점군(λ0/λ1 < PLANAR_RATIO)인데 그 법선이 벨트 법선에서 크게
+    벌어졌으면 기울어 놓인 것이므로 None 을 돌려준다 — 호출자가 무구속으로
+    폴백해야 한다. 옆면까지 보이는 점군은 이 검사를 건너뛴다(법선 정의가
+    상면이 아니게 되므로 판정 자체가 성립하지 않는다).
+    """
+    if len(points) < 30:
+        return None
+    n, d = plane
+    c = points - points.mean(0)
+    lam, V = np.linalg.eigh(c.T @ c)
+    if lam[0] <= PLANAR_RATIO * lam[1] and \
+            abs(float(V[:, 0] @ n)) < np.cos(np.radians(tilt_max_deg)):
+        return None
+    thk = max(float(np.quantile(points @ n + d, top_q)), min_thickness)
+
+    # 평면 기저 (u, v, n) 에서 최소면적 사각형 = 풋프린트 + yaw
+    u = np.cross(n, [1.0, 0.0, 0.0])
+    if np.linalg.norm(u) < 0.1:
+        u = np.cross(n, [0.0, 1.0, 0.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    uv = np.column_stack([points @ u, points @ v]).astype(np.float32)
+    (cu, cv), (su, sv), ang = cv2.minAreaRect(uv)
+    t = np.radians(ang)
+    e1 = np.cos(t) * u + np.sin(t) * v
+    e2 = -np.sin(t) * u + np.cos(t) * v
+    # n·p 는 평면 위 높이 - d 이므로, 중심을 두께의 절반 높이에 놓으려면
+    # 법선 성분이 thk/2 - d 여야 한다 (u, v ⊥ n, |n| = 1).
+    center = cu * u + cv * v + (thk / 2 - d) * n
+    return ObbResult(center=center, extent=np.array([su, sv, thk]),
+                     R=np.column_stack([e1, e2, n]), num_points=len(points))
+
+
 def match_axes(R_new, extent_new, R_prev):
     """Reorder/flip columns of R_new to best align with R_prev.
 

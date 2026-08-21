@@ -75,14 +75,17 @@ def depth_intrusion(track, z):
     """관측 depth가 트랙 추정 깊이보다 유의하게 '가까우면' True — 가리개.
 
     가리개 침입의 단일 술어 (association 매칭 제외·rescue 거부·flow 전파
-    보류가 전부 이것을 쓴다). 기준선은 필터의 z 추정 + 불확실성:
+    보류가 전부 이것을 쓴다). 기준선은 트랙 **상면**의 z 추정 + 불확실성 —
+    z 는 masked_depth_median, 즉 보이는 면의 depth 이므로 물체 중심과
+    비교하면 안 된다 (평면 구속 이후 중심은 상면보다 h/2 만큼 멀다:
+    실측 black bag h/2 ≈ 0.09·z 로 물리 절 0.9·z 를 삼킬 뻔했다).
     통계 유의(χ²(0.999,1)의 한쪽 꼬리 3.29σ) AND 물리 유의(10% 이상 근접)
     둘 다 만족해야 침입 — 잡음 큰 물체(검은 가방)의 정상 요동을 가리개로
     오인하지 않는다. 거부·미관측 중 P가 자라 σ가 넓어지므로 실제 depth
     변화(물체가 들림 등)는 유한 시간 안에 침입 판정을 벗어난다 (교착 없음)."""
     if z is None or track.filter is None:
         return False
-    zt = float(track.filter.center[2])
+    zt = track.surface_z
     sigma = track.filter.innovation_std(2)
     return zt > 0 and z < zt - 3.29 * sigma and z < 0.9 * zt
 
@@ -106,11 +109,24 @@ class Track:
     mask: np.ndarray | None = field(default=None, repr=False)  # 하이브리드 추적용
     filter: TrackFilter | None = field(default=None, repr=False)  # 위치+크기 상태
     frozen: bool = False       # 연속 미검출로 동결 (association 부기 — 게이트 아님)
+    plane_constrained: bool = False  # 필터를 시드한 관측 규약 (벨트 평면 구속 여부)
     n_accepted: int = 0        # 수락된 pose 관측 수 (M-of-N 승격용)
     last_accept_t: float | None = None  # 마지막 수락 시각 (신선도)
     now: float = 0.0           # 파이프라인이 매 프레임 주입하는 현재 시각
     pub_score_min: float = 0.0  # 발행 하한 (0=끔). 아래 publishable 참고
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
+
+    @property
+    def surface_z(self):
+        """카메라 쪽 상면의 z (m) — depth 관측과 같은 척도.
+
+        OBB 를 광축에 투영한 반높이를 중심에서 뺀다. 축 순열과 무관하고,
+        기울어진 OBB 에서는 과대평가 쪽(= 침입 판정이 보수적)으로 틀린다.
+        """
+        zc = float(self.filter.center[2])
+        if self.obb is None:
+            return zc
+        return zc - 0.5 * float(np.abs(self.obb.R[2]) @ self.obb.extent)
 
     @property
     def fresh(self):
