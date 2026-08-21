@@ -132,9 +132,25 @@ def test_merge_holds_when_size_claims_disagree():
         assert tr.merge_duplicates() == set()
 
 
-def test_merge_off_by_default():
-    """기본 꺼짐 — 판정 상수가 벨트 씬 전용이라 미검증 씬에서는 순수 위험."""
-    tr = IouTracker(max_per_label=10)
+def test_merge_is_noop_when_one_track_per_label():
+    """라벨당 트랙이 하나인 구성에서는 켜져 있어도 아무 일도 하지 않는다.
+
+    이것이 기본 켜짐의 안전 근거다 — 실기 bag(test2~5)은 전부
+    max_per_prompt=1 이라 이 경로로 조기 반환한다. 반대로 max_per_label 을
+    열면 중복 위험도 함께 열리므로 두 설정은 짝이다(IouTracker 주석).
+    조기 반환을 지워도 통과하지 않도록 CONFIRM_N 회 이상 반복해야 한다 —
+    한 번만 부르면 연속 카운트가 안 차서 음성 대조가 성립하지 않는다."""
+    tr = IouTracker(max_per_label=1)
     _dup_pair(tr)
     for _ in range(CONFIRM_N * 2):
         assert tr.merge_duplicates() == set()
+
+
+def test_merge_on_by_default_when_label_allows_many():
+    """max_per_label 을 열면 기본값만으로 중복이 병합된다."""
+    tr = IouTracker(max_per_label=10)
+    _dup_pair(tr)
+    dead = set()
+    for _ in range(CONFIRM_N * 2):
+        dead |= tr.merge_duplicates()
+    assert dead

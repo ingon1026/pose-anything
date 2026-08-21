@@ -135,8 +135,9 @@ def main():
                     help="프롬프트당 유지할 인스턴스 수 (0=제한 없음)")
     ap.add_argument("--image-size", type=int, default=0,
                     help="SAM3 입력 해상도 (0=기본 1008)")
-    ap.add_argument("--enable-merge", action="store_true",
-                    help="수렴한 중복 트랙 사후 병합 (벨트 씬 보정값 — isaac 전용)")
+    ap.add_argument("--no-merge", action="store_true",
+                    help="수렴한 중복 트랙 사후 병합 끄기 (기본 켜짐 — 라벨당 트랙이 "
+                         "하나면 어차피 no-op 이다)")
     ap.add_argument("--publish-score-min", type=float, default=0.0,
                     help="발행 점수 하한(0=끔). Isaac 프리셋은 0.6 을 쓴다 — "
                          "그 정책을 bag 으로 재현하려면 같은 값을 줄 것")
@@ -171,7 +172,7 @@ def main():
         detect_interval=args.detect_interval,
         max_per_prompt=args.max_per_prompt,
         pub_score_min=args.publish_score_min,
-        enable_merge=args.enable_merge,
+        enable_merge=not args.no_merge,
         use_belt_plane=not args.no_belt_plane,
         enable_footprint_gate=not args.no_footprint_gate,
         belt_plane=parse_plane(args.belt_plane))

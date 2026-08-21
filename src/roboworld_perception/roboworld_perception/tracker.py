@@ -233,7 +233,7 @@ class Track:
 class IouTracker:
     def __init__(self, iou_threshold=0.3, max_missed=5, max_per_label=0,
                  occlusion_hold=12, rescue_buffer=2.5, pub_score_min=0.0,
-                 enable_merge=False):
+                 enable_merge=True):
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
         # 가림 대응: missed가 max_missed를 넘으면 삭제 대신 "동결" —
@@ -250,9 +250,16 @@ class IouTracker:
         self.rescue_buffer = rescue_buffer
         # 트랙 생성 시 각 Track 에 그대로 넘긴다 (Track.publishable 참고)
         self.pub_score_min = pub_score_min
-        # 중복 병합. KAPPA_PHYS가 벨트 씬에서 측정된 값이라 기본은 끈다 —
-        # 실기 bag은 라벨이 유일해 중복 표본이 없고(test2~5 전부), 검증되지
-        # 않은 씬에서 켜면 순수한 위험이다. pub_score_min과 같은 관례.
+        # 중복 병합. **기본 켜짐** — max_per_label 을 1 보다 크게 여는 것이
+        # 곧 중복 트랙 위험을 여는 것이라 두 설정은 짝이다. 따로 두면
+        # "프리셋은 켰는데 회귀는 안 켠" 구성이 조용히 생긴다(2026-08-21 실제
+        # 발생: isaac.launch.py 는 true 인데 오프라인 회귀가 기본 false 라
+        # 실운용에 없는 쓰레기 트랙 1,613 프레임을 결함으로 오인했다).
+        # 실기 무영향은 구조적으로 보장된다 — merge_duplicates 가
+        # max_per_label == 1 에서 조기 반환하고, test2~5 는 전부 1 이다.
+        # 실증(2026-08-21 test4): 켜짐/꺼짐 결과가 완전히 동일하다.
+        # KAPPA_PHYS 는 여전히 벨트 씬 보정값이므로, max_per_label > 1 인
+        # **다른** 씬을 쓸 때는 재확인할 것.
         self.enable_merge = enable_merge
         self._merge_runs = {}   # (id_lo, id_hi) -> (연속 성립 횟수, tau 이력)
         self.tracks: list[Track] = []

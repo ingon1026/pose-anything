@@ -66,7 +66,7 @@ class PerceptionNode(Node):
         self.declare_parameter("sync_queue_size", 5)
         # 발행 점수 하한. 0.0 = 끔. 근거와 주의는 Track.publishable 의 주석.
         # 중복 병합 — 벨트 씬에서 보정된 상수라 기본 꺼짐 (tracker.KAPPA_PHYS 주석)
-        self.declare_parameter("enable_merge", False)
+        self.declare_parameter("enable_merge", True)
         self.declare_parameter("publish_score_min", 0.0)
         # SAM3 입력 해상도. 0 = 기본 1008px.
         # Isaac Sim 과 GPU 를 나눠 쓰면 VRAM 이 부족해지고, 그러면 렌더프로덕트
