@@ -7,7 +7,6 @@ FAIL 이 나야 할 것에서 FAIL 이, PASS 여야 할 것에서 PASS 가 나�
 사용: python3 scripts/check_accuracy_selftest.py <기준CSV디렉토리>
 """
 import csv
-import glob
 import os
 import subprocess
 import sys
@@ -15,6 +14,8 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESS = os.path.join(HERE, "check_accuracy.py")
+sys.path.insert(0, HERE)
+from check_accuracy import resolve_csv  # noqa: E402  (HERE 를 먼저 넣어야 한다)
 
 
 def read(path):
@@ -97,8 +98,7 @@ CASES = [
 
 def main():
     ref_dir = sys.argv[1]
-    src = [p for p in glob.glob(os.path.join(ref_dir, "*.csv"))
-           if not p.endswith("_raw.csv")][0]
+    src = resolve_csv(ref_dir)
     fields, rows = read(src)
 
     print(f"기준: {src}\n")

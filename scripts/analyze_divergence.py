@@ -18,8 +18,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, "src/roboworld_perception")
-from roboworld_perception.fusion import (FLOW_STEP_STD,  # noqa: E402
-                                         SYNC_STD, TrackFilter)
+from roboworld_perception.fusion import TrackFilter, pos_r_extra  # noqa: E402
 
 WINDOW = 12          # 슬라이딩 창 길이(프레임) — 키프레임 주기 5 의 배수
 SIGN_MIN = 0.75      # 창 안 부호 편향 |sum(sign)|/W 하한
@@ -33,7 +32,10 @@ def load(path, label):
 
 
 def replay(rows):
-    """raw 관측 -> [(t, 혁신(3), 수락, 상태(3))]. 파이프라인과 같은 r_extra."""
+    """raw 관측 -> [(t, 혁신(3), 수락, 상태(3))].
+
+    r_extra 는 fusion.pos_r_extra 를 그대로 부른다 — 복사하면 파이프라인이
+    항을 추가할 때 이 도구가 조용히 다른 필터를 재현하게 된다."""
     t0 = float(rows[0]["stamp"])
     c0 = np.array([float(rows[0][k]) for k in ("rx", "ry", "rz")])
     e0 = np.sort([float(rows[0][k]) for k in ("re1", "re2", "re3")])[::-1]
@@ -48,8 +50,7 @@ def replay(rows):
         z = np.array([float(r[k]) for k in ("rx", "ry", "rz")])
         nu = z - f.x
         sp = float(np.linalg.norm(f.v))
-        ok = f.fuse_pos(z, (sp * dt) ** 2 + (sp * SYNC_STD) ** 2
-                        + (FLOW_STEP_STD * steps) ** 2)
+        ok = f.fuse_pos(z, pos_r_extra(sp, dt, steps))
         out.append((t - t0, nu.copy(), ok, f.x.copy()))
     return out
 

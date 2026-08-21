@@ -61,7 +61,7 @@ def main():
         vis = m.get_vision_features(pixel_values=px)
         print(f"  vision_encoder (프레임당 1회)        {t_vis:7.1f} ms")
 
-        texts = [det._text_inputs(p) for p in PROMPTS]
+        texts = [det.processor(text=p, return_tensors="pt").to(det.device) for p in PROMPTS]
         t_txt = timed(lambda: [m.get_text_features(**t) for t in texts], N)
         print(f"  text_encoder x{len(PROMPTS)} (매번 재계산 중)     {t_txt:7.1f} ms")
 

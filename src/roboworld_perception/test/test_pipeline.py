@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 
+from conftest import K
 from roboworld_perception.pipeline import PerceptionPipeline, propagate_mask
 
 
@@ -54,7 +55,6 @@ class StubDetector:
 def test_hybrid_calls_sam_only_on_keyframes():
     det = StubDetector()
     pipe = PerceptionPipeline(det, detect_interval=5)
-    K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
     depth = np.full((240, 320), 1000, np.uint16)
     rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
     for i in range(10):
@@ -79,7 +79,6 @@ def test_plane_fit_is_attempted_only_once(monkeypatch):
                         lambda *a, **kw: tries.append(1) or None)
     pipe = P.PerceptionPipeline(StubDetector(), detect_interval=5,
                                 use_belt_plane=True)
-    K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
     depth = np.full((240, 320), 1000, np.uint16)
     rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
     for _ in range(20):  # 키프레임 4회
@@ -130,7 +129,6 @@ def test_suppressed_flow_does_not_withhold_observations():
     생겨 fusion 설계의 '거부 중에도 게이트가 스스로 열린다'가 무의미해진다.
     """
     pipe = PerceptionPipeline(StubDetector(), detect_interval=5)
-    K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
     depth = np.full((240, 320), 1000, np.uint16)
     for i in range(4):  # 0=키프레임, 1~3=흐름이 갈라지는 프레임
         rgb = cv2.cvtColor(two_motion_frame(0, 12 * i), cv2.COLOR_GRAY2RGB)
@@ -141,7 +139,6 @@ def test_suppressed_flow_does_not_withhold_observations():
     assert np.allclose(t.box, [100, 100, 180, 160])  # 마스크는 안 밀렸다
 def _plane_pipe():
     """벨트를 z=1.0 에 고정한 평면 구속 파이프라인 (캘리브 노브로 직접 주입)."""
-    from roboworld_perception.pipeline import PerceptionPipeline
     return PerceptionPipeline(StubDetector(), detect_interval=5,
                               use_belt_plane=True,
                               belt_plane=(np.array([0.0, 0.0, -1.0]), 1.0))
@@ -149,7 +146,6 @@ def _plane_pipe():
 
 def _run(pipe, obj_depth_mm):
     """마스크 영역만 obj_depth_mm 인 장면을 여러 프레임 흘린다."""
-    K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
     depth = np.full((240, 320), 1000, np.uint16)   # 벨트 z=1.0m
     depth[100:160, 100:180] = obj_depth_mm
     rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
@@ -176,3 +172,37 @@ def test_normal_thickness_still_seeds():
     track = _run(_plane_pipe(), 950)      # 두께 50mm
     assert track.filter is not None
     assert abs(float(track.filter.extent_sorted[2]) - 0.050) < 0.005
+
+
+def test_reset_restores_run_state_without_losing_settings():
+    """reset() 은 런 상태만 지우고 설정은 남긴다.
+
+    이 함수는 오랫동안 **어떤 테스트도 부르지 않아** 무검증이었고, 2026-08-21 에
+    생성자 인자 대입이 복제돼 NameError 로 죽은 채 90개 테스트가 전부 통과했다.
+    유일한 호출처가 런타임 프롬프트 교체(/perception/prompt)라 제품에서만
+    드러난다. 설정과 런 상태를 양쪽으로 고정한다.
+    """
+    pipe = PerceptionPipeline(StubDetector(), detect_interval=5,
+                              enable_footprint_gate=False, use_belt_plane=False)
+    depth = np.full((240, 320), 1000, np.uint16)
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(7):
+        pipe.process(rgb, depth, K, ["obj"])
+    assert pipe.tracker.tracks and pipe._frame_idx == 7
+
+    pipe.reset()
+
+    assert pipe._frame_idx == 0 and pipe._prev_gray is None   # 런 상태는 지워지고
+    assert pipe._last_stamp is None and not pipe.tracker.tracks
+    assert pipe.enable_footprint_gate is False                # 설정은 남는다
+    assert pipe.use_belt_plane is False
+    assert pipe.detect_interval == 5
+    pipe.process(rgb, depth, K, ["obj"])                      # 리셋 후에도 돈다
+
+
+def test_reset_keeps_a_pinned_belt_plane():
+    """직접 준 평면(캘리브 값)은 reset 이 버리지 않는다 — _plane_fixed 계약."""
+    plane = (np.array([0.0, 0.0, -1.0]), 1.0)
+    pipe = PerceptionPipeline(StubDetector(), belt_plane=plane)
+    pipe.reset()
+    assert pipe.belt_plane is plane

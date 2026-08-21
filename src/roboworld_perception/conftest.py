@@ -5,6 +5,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# 합성 장면용 내부 파라미터 (테스트 공용 단일 정의)
+K = np.array([[300.0, 0, 160], [0, 300.0, 120], [0, 0, 1]])
+
 
 def make_det(box=(100, 100, 200, 180), label="obj", score=0.9):
     """트래커 테스트 공용 검출 dict (스키마 단일 정의)."""

@@ -27,6 +27,11 @@ class ObbResult:
     def quat_xyzw(self) -> np.ndarray:
         return Rotation.from_matrix(self.R).as_quat()
 
+    @property
+    def extent_sorted(self) -> np.ndarray:
+        """내림차순 정렬 extent — fusion.TrackFilter.extent_sorted 와 같은 규약."""
+        return np.sort(np.asarray(self.extent))[::-1]
+
 
 def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
                          z_range=(0.10, 3.0), erode_px=3,
@@ -41,20 +46,14 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
     m = mask.astype(np.uint8)
     if erode_px > 0:
         m = cv2.erode(m, np.ones((erode_px, erode_px), np.uint8))
-    ys, xs = np.nonzero(m)
-    if stride > 1:
-        ys, xs = ys[::stride], xs[::stride]
-    if len(ys) == 0:
+    # 역투영과 depth 인코딩 정규화는 _backproject 가 단일 정의로 갖는다 —
+    # RealSense uint16 mm 와 Isaac float32 m 를 가르는 규약이 두 곳에 흩어지면
+    # 어긋났을 때 1000 배 오차가 조용히 난다.
+    pts = _backproject(depth, K, depth_scale, stride, z_range, m.astype(bool))
+    if len(pts) < 10:
         return np.empty((0, 3))
 
-    z = depth[ys, xs].astype(np.float64)
-    if depth.dtype != np.float32 and depth.dtype != np.float64:
-        z *= depth_scale
-    valid = (z > z_range[0]) & (z < z_range[1])
-    z, ys, xs = z[valid], ys[valid], xs[valid]
-    if len(z) < 10:
-        return np.empty((0, 3))
-
+    z = pts[:, 2]
     med = np.median(z)
     mad = np.median(np.abs(z - med)) + 1e-6
     # MAD 만으로 자르면 합성(Isaac) depth 에서 무너진다. 렌더면은 잡음이 없어
@@ -72,12 +71,7 @@ def mask_depth_to_points(mask, depth, K, depth_scale=0.001, stride=2,
     # far_band 를 24 mm 보다 작게 유지하는 것이 이 씬의 상한이다.
     half = 3.0 * 1.4826 * mad
     keep = (z > med - max(half, near_band)) & (z < med + max(half, far_band))
-    z, ys, xs = z[keep], ys[keep], xs[keep]
-
-    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    x = (xs - cx) * z / fx
-    y = (ys - cy) * z / fy
-    return np.column_stack([x, y, z])
+    return pts[keep]
 
 
 def masked_depth_median(mask, depth, depth_scale=0.001, box=None,

@@ -14,7 +14,7 @@ offline 스크립트와 ROS 노드가 공유하는 헬퍼(이미지 디코드, C
 import cv2
 import numpy as np
 
-from .fusion import FLOW_STEP_STD, SYNC_STD, TrackFilter
+from .fusion import TrackFilter, pos_r_extra
 from .geometry import (MAX_THICKNESS, compute_obb, fit_plane,
                        mask_depth_to_points, masked_depth_median, obb_on_plane)
 from .tracker import IouTracker, depth_intrusion
@@ -171,10 +171,13 @@ FOOTPRINT_ALPHA = 0.02   # 기준 EMA 이득 — 시정수 ~50프레임. 실측 
                          # 25프레임(1.5s)이라 기준이 절반도 못 따라간다.
 
 
-def _footprint_truncated(track, obb):
-    """이 관측의 풋프린트가 트랙의 기준에서 벗어났는가 (절단/오염 판정).
+def _footprint_deviation(track, obb):
+    """풋프린트 면적의 느린 기준을 갱신하고 log 편차를 돌려준다.
 
-    반환: (절단 여부, |log 편차|). 부작용으로 기준을 EMA 갱신한다.
+    **항상 불러야 한다** — 게이트가 꺼져 있어도 기준이 따라가고 있어야 켜는
+    순간부터 유효하다. 그래서 판정(부호·문턱 비교)은 호출자에게 남긴다:
+    갱신과 판정을 한 함수에 묶으면 "노브를 먼저 검사하면 싸다"는 리팩터가
+    기준을 조용히 얼려버린다.
 
     **플래그가 떠도 기준은 계속 따라간다.** 동결이 더 잘 잡을 것 같지만 실측은
     반대였다(드리프트 검출 동일 72%, 정상 프레임 오탐은 7.2% -> 17.8% 로 악화).
@@ -203,14 +206,14 @@ def _footprint_truncated(track, obb):
     (>30mm 4% -> 39%)의 원인이었다. mask_depth_to_points 의 near/far 밴드
     비대칭과 같은 계보다: 막으려는 것과 살려야 하는 것이 서로 반대 방향에 있다.
     """
-    e = np.sort(np.asarray(obb.extent))[::-1]
+    e = obb.extent_sorted
     la = float(np.log(e[0] * e[1] + 1e-12))
     if track.area_ref is None:
         track.area_ref = la
-        return False, 0.0
+        return 0.0
     dev = la - track.area_ref
     track.area_ref += FOOTPRINT_ALPHA * dev
-    return dev < -FOOTPRINT_TAU, abs(dev)
+    return dev
 
 
 def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
@@ -255,6 +258,20 @@ class PerceptionPipeline:
         self._plane_tried = False
         # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
         self.enable_footprint_gate = enable_footprint_gate
+        self._reset_run_state()
+
+    def _reset_run_state(self):
+        """런(run) 단위 상태를 초기화한다 — __init__ 과 reset() 의 단일 정의.
+
+        두 곳에서 손으로 같은 목록을 유지하면 조용히 갈라진다. 2026-08-21 에
+        실제로 그랬다: 새 필드를 추가하며 생성자 인자 대입이 reset() 에까지
+        복제돼 NameError 가 났고, **어떤 테스트도 reset() 을 부르지 않아**
+        90개가 그대로 통과했다. reset() 의 호출처는 런타임 프롬프트 교체
+        (/perception/prompt) 하나뿐인데 그게 제로샷의 실사용 형태다.
+        """
+        if not self._plane_fixed:
+            self.belt_plane = None
+            self._plane_tried = False
         self._frame_idx = 0
         self._prev_gray = None
         self._last_stamp = None
@@ -263,15 +280,7 @@ class PerceptionPipeline:
 
     def reset(self):
         self.tracker.reset()
-        if not self._plane_fixed:
-            self.belt_plane = None
-            self._plane_tried = False
-        # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
-        self.enable_footprint_gate = enable_footprint_gate
-        self._frame_idx = 0
-        self._prev_gray = None
-        self._last_stamp = None
-        self._last_dt = NOMINAL_DT
+        self._reset_run_state()
 
     def process(self, rgb, depth, K, prompts, stamp_s=None):
         """반환: 이 프레임의 트랙 목록(가림 트랙 포함 — 표시용).
@@ -329,10 +338,12 @@ class PerceptionPipeline:
                 self._plane_tried = True
                 self.belt_plane = _fit_support_plane(strong, depth, K,
                                                      self.depth_scale)
-            # 단발 추정 후 영구 캐시다. 조용히 틀린 평면은 두께·중심 z 로만
-            # 드러나 원인을 평면에서 찾지 않게 된다 — 한 줄이라도 남긴다.
-            print(f"[belt_plane] {self.belt_plane}" if self.belt_plane
-                  else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행")
+                # 단발 추정 후 영구 캐시다. 조용히 틀린 평면은 두께·중심 z 로만
+                # 드러나 원인을 평면에서 찾지 않게 된다 — 한 줄이라도 남긴다.
+                # 시도한 경우에만 찍는다 — 검출이 늦게 잡히는 씬에서 "실패" 를
+                # 매 키프레임 스팸하면 시도조차 안 한 것과 구분이 안 된다.
+                print(f"[belt_plane] {self.belt_plane}" if self.belt_plane
+                      else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행")
         for d in detections:  # 매칭 비용(depth 충돌 배제)이 쓸 depth를 1회만 계산
             d["z"] = masked_depth_median(d["mask"], depth, self.depth_scale,
                                          d["box"])
@@ -431,23 +442,23 @@ class PerceptionPipeline:
         # 이동 물체의 마스크는 프레임 주기 안 어디 시점의 위치인지 불확실 —
         # v·dt 항이 없으면 빠른 구간(test3 실측 137mm/s)에서 정직한 관측이
         # 게이트 폭(~2mm)을 넘어 기각된다. 정지 물체에서는 0이라 무해.
-        r_extra = ((speed * self._last_dt) ** 2 + (speed * SYNC_STD) ** 2
-                   + (FLOW_STEP_STD * steps) ** 2)
+        r_extra = pos_r_extra(speed, self._last_dt, steps)
         # 가리개에 의한 절단도 화면 절단과 같은 사건이다 — 보이는 부분의
         # 중심은 물체의 중심이 아니다. 판정은 화면 경계와 무관하므로 먼저
         # 부르고(기준 EMA 가 매 프레임 돌아야 한다), 처리는 border 와 합친다.
         # 기준 EMA 는 게이트가 꺼져 있어도 매 프레임 돌려야 한다 — 켜는
         # 순간부터 기준이 유효하려면 항상 따라가고 있어야 하고, 부작용이 없다.
-        if _footprint_truncated(track, obb)[0] and self.enable_footprint_gate:
+        # 기준 EMA 는 게이트가 꺼져 있어도 매 프레임 돌아야 한다 — 켜는 순간
+        # 기준이 낡아 있으면 오탐이 터진다. 그래서 갱신을 먼저, 판정은 뒤에.
+        area_dev = _footprint_deviation(track, obb)
+        if self.enable_footprint_gate and area_dev < -FOOTPRINT_TAU:
             # 가리개에 잘린 관측 — 보이는 부분의 중심은 물체의 중심이 아니다.
             # depth 침입과 같은 처리로 **관측을 통째로 버린다**. 화면 절단처럼
             # r_extra 로 흡수하지 않는 이유: 불확실성을 키우면 게이트가 함께
             # 넓어져 오염 관측이 오히려 더 잘 수락된다(합성 회귀에서 500mm
-            # 침입이 통과했다). 우리가 원하는 건 "덜 믿는다" 가 아니라
-            # "이 프레임은 안 본다" 이다.
-            # 관측이 없으면 신선도 타이머가 흘러 T_STALE 뒤 발행이 멈추고,
-            # predict 가 P 를 계속 키우므로 교착도 없다. 물체가 실제로 바뀐
-            # 경우는 _footprint_truncated 의 채택 상계가 풀어준다.
+            # 침입이 통과했다). 원하는 건 "덜 믿는다" 가 아니라 "이 프레임은
+            # 안 본다" 이다. 관측이 없으면 신선도 타이머가 흘러 T_STALE 뒤
+            # 발행이 멈추고, predict 가 P 를 키우므로 교착도 없다.
             return
         if border:
             # 절단 마스크의 중심은 보이는 쪽으로 편향 — 편향을 불확실성으로

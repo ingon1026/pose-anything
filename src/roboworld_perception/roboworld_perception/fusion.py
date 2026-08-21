@@ -48,6 +48,20 @@ FLOW_STEP_STD = 0.002  # m/프레임 — 키프레임 이후 LK 누적 드리프
 V0_STD = 0.05        # m/s — 속도 초기·rescue 재팽창 불확실성
 
 
+def pos_r_extra(speed, dt, flow_steps):
+    """프레임별 가산 위치 측정잡음 (분산, m²).
+
+    이 모듈이 R 모델 상수를 전부 갖는다고 선언했으므로 **조합식도 여기 둔다** —
+    파이프라인과 오프라인 분석 도구가 각자 복사하면, 항이 하나 늘 때 도구가
+    조용히 다른 필터를 재현하게 된다.
+
+    speed: 트랙 속도 크기(m/s), dt: 프레임 간격(s),
+    flow_steps: 마지막 키프레임 이후 경과한 flow 프레임 수.
+    """
+    return ((speed * dt) ** 2 + (speed * SYNC_STD) ** 2
+            + (FLOW_STEP_STD * flow_steps) ** 2)
+
+
 class TrackFilter:
     """트랙 1개의 위치+크기 상태. 회전은 필터 밖(기존 match_axes/slerp)."""
 

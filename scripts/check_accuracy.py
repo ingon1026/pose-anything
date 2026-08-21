@@ -52,18 +52,28 @@ SMALL_PX_MAX = 76.0
 DEFAULT_FX = 640.0   # D455 1280x720 컬러 공칭. --fx 로 덮어쓸 것.
 
 
+def resolve_csv(path):
+    """CSV 경로 또는 CSV 가 든 디렉토리 → 실제 CSV 경로.
+
+    `_raw.csv` 제외 규칙의 단일 정의 — 이 규칙이 두 곳에 있으면 한쪽만 바뀔 때
+    도구가 조용히 다른 파일을 기준으로 잡는다.
+    """
+    if not os.path.isdir(path):
+        return path
+    cands = [p for p in glob.glob(os.path.join(path, "*.csv"))
+             if not p.endswith("_raw.csv")]
+    if not cands:
+        sys.exit(f"CSV 를 찾을 수 없다: {path}")
+    return cands[0]
+
+
 def load(path):
     """CSV 또는 CSV 가 든 디렉토리 → {label: {stamp: row}}. 라벨당 최장 트랙만.
 
     라벨당 트랙이 여럿일 수 있어(test5 gray notebook 2개) 최장 트랙을 그
     라벨의 대표로 본다 — compare 계열 스크립트와 같은 관용구다.
     """
-    if os.path.isdir(path):
-        cands = [p for p in glob.glob(os.path.join(path, "*.csv"))
-                 if not p.endswith("_raw.csv")]
-        if not cands:
-            sys.exit(f"CSV 를 찾을 수 없다: {path}")
-        path = cands[0]
+    path = resolve_csv(path)
     per_track = defaultdict(list)
     for r in csv.DictReader(open(path)):
         per_track[(r["label"], r["track_id"])].append(r)
