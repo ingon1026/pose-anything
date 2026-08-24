@@ -42,8 +42,12 @@ echo; echo "=== 인식 노드 기동 ==="
 setsid ros2 launch roboworld_perception isaac.launch.py > "$OUT/node.log" 2>&1 &
 until grep -q "SAM3 ready" "$OUT/node.log" 2>/dev/null; do sleep 5; done
 echo "SAM3 ready — 추론이 실제로 도는지 확인:"
-timeout 25 ros2 topic hz /perception/detections 2>&1 | grep -m1 "average rate" \
-  || echo "  ⚠ 검출 미발행 — 이 상태의 VRAM 은 활성화 몫이 빠져 무효다"
+# 경고로 두면 안 된다 — 아침(2026-08-24) 측정을 무효로 만든 조건이 정확히
+# 이것이다. SAM3 가 로드만 되고 추론을 한 번도 안 한 상태의 VRAM 을 재서
+# '동시 피크 9,497 MiB' 로 보고했다(실제 8,691). 값이 나와버리면 사람은 쓴다.
+timeout 25 ros2 topic hz /perception/detections 2>&1 | grep -m1 "average rate" || {
+  echo "→ 검출 미발행. 이 상태의 VRAM 은 활성화 몫이 빠져 무효다 — 측정을 중단한다."
+  pkill -f perception_node; exit 1; }
 
 echo; echo "=== ④ 동시 구동 피크 ==="; sample isaac_plus_sam3 60
 
