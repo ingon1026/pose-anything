@@ -1,11 +1,20 @@
 """프롬프트 임베딩 캐시 — 모델 없이 검증한다.
 
-sam3_detector 는 transformers 를 `__init__` 안에서 임포트하므로 모듈 자체는
-GPU·모델 없이 불러올 수 있다. 캐시 로직만 스텁으로 실제 경로를 태운다.
+캐시 로직만 스텁으로 실제 경로를 태운다 — 모델도 GPU 도 안 쓴다.
+다만 sam3_detector 모듈 자체가 torch 를 top-level 로 임포트하므로,
+torch 가 없는 환경(CI)에서는 아래 importorskip 으로 건너뛴다.
 """
 import numpy as np
+import pytest
 
-from roboworld_perception.sam3_detector import TEXT_CACHE_MAX, Sam3Detector
+# sam3_detector 는 torch 를 **top-level 로** 임포트한다(기본 인자에 torch.bfloat16
+# 이 쓰인다). CI 는 의도적으로 torch 를 안 깔고 geometry·tracker·pipeline 만
+# 돌리므로(.github/workflows 주석 참고) 여기서 건너뛴다. 모델·GPU 는 여전히
+# 필요 없다 — 이 파일은 캐시 로직만 스텁으로 태운다.
+pytest.importorskip("torch", reason="CI 는 torch 를 설치하지 않는다")
+
+from roboworld_perception.sam3_detector import (  # noqa: E402
+    TEXT_CACHE_MAX, Sam3Detector)
 
 
 class _Inputs(dict):
