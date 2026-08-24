@@ -342,8 +342,12 @@ class PerceptionPipeline:
                 # 드러나 원인을 평면에서 찾지 않게 된다 — 한 줄이라도 남긴다.
                 # 시도한 경우에만 찍는다 — 검출이 늦게 잡히는 씬에서 "실패" 를
                 # 매 키프레임 스팸하면 시도조차 안 한 것과 구분이 안 된다.
+                # flush 필수 — 없으면 launch 로 띄웠을 때 버퍼에 갇혀
+                # 운영 중 진단이 안 된다(2026-08-24 라이브에서 실제로 못 봤다).
+                # sam3_detector 의 프롬프트 경고가 같은 이유로 flush 를 쓴다.
                 print(f"[belt_plane] {self.belt_plane}" if self.belt_plane
-                      else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행")
+                      else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행",
+                      flush=True)
         for d in detections:  # 매칭 비용(depth 충돌 배제)이 쓸 depth를 1회만 계산
             d["z"] = masked_depth_median(d["mask"], depth, self.depth_scale,
                                          d["box"])

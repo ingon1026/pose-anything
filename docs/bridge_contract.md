@@ -192,15 +192,28 @@ jazzy\lib 까지 모두 들어간 상태에서 막혔다. 환경변수를 의심
 Smart App Control 은 예외 목록이 없다. 끄는 방법뿐이고 한 번 끄면 Windows 를
 재설치하기 전까지 다시 켤 수 없다.
 
-**같은 파일이라도 날마다 판정이 뒤집힌다.** SAC 는 클라우드 평판으로 판단하므로
-어제 통과한 DLL 이 오늘 막힐 수 있다. 실제 기록(이 PC):
+**SAC 는 예고 없이 평가 모드에서 차단 모드로 승격한다.** 평가 모드에서는
+로그만 남기고 통과시키므로, 승격 전까지는 아무 문제가 없다. 승격 시점에
+코드도 설정도 그대로인 채로 갑자기 막힌다. 실제 기록(이 PC):
 
-    08-13  빌드 직후    차단   (평판 없음)
-    08-19  ~ 08-21      통과   (39 Hz 로 정상 동작한 날들)
-    08-24               차단   (다시 막힘)
+    08-13  빌드 직후         이벤트 있음, 그러나 통과 (평가 모드)
+    08-19 ~ 08-21           통과 — 39 Hz 로 정상 동작
+    08-24                   차단 — 승격됨
 
-그러니 "코드를 안 건드렸는데 어제 되던 게 오늘 안 된다" 면 이것부터 볼 것.
-정책이 바뀐 흔적(이벤트 3099)이 없어도 막힐 수 있다 — 파일 평판만 뒤집히면 된다.
+승격 여부는 레지스트리에 남는다:
+
+```powershell
+Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' |
+  Select-Object VerifiedAndReputablePolicyState, SAC_PreviousState, SAC_EnforcementReason
+#   VerifiedAndReputablePolicyState : 1   <- 지금 차단 중
+#   SAC_PreviousState               : 2   <- 원래 평가 모드였다  = 스스로 승격했다
+```
+
+`SAC_PreviousState` 가 2 인데 현재 상태가 1 이면 이 경우다. 정책 갱신
+이벤트(3099)를 찾아봐야 안 나온다 — 정책이 바뀐 게 아니라 모드가 바뀐 것이다.
+
+끄고 나면 `VerifiedAndReputablePolicyState` 가 0 이 되고 `SAC_PreviousState`
+가 1 로 바뀐다. **값이 0 이어도 재부팅 전에는 적용되지 않는다.**
 
 ## 4. 브리지 쪽에 요청해야 하는 것
 
