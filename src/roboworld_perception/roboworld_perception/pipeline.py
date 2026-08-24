@@ -327,9 +327,11 @@ class PerceptionPipeline:
     def time_reset_required(self, stamp_s):
         """Whether ``stamp_s`` belongs to a new, reset clock run.
 
-        Kept public because the ROS node must withdraw its last published
-        Detection3DArray *before* the next expensive detector invocation.
-        ``process`` enforces the same rule for the offline entry point.
+        ``process`` 가 스스로 이 술어를 쓴다. public 인 것은 ROS 노드가
+        다음 검출 전에 마지막 Detection3DArray 를 회수할 수 있게 하려던
+        것인데, **지금 저장소의 노드는 이걸 부르지 않는다** — 그 호출자는
+        커밋되지 않은 채로 버려졌다. 노드 쪽을 다시 붙일 때까지 이 메서드의
+        유일한 실사용자는 process 다.
         """
         return (self._last_stamp is not None
                 and self._last_stamp > STAMP_RESET_NEW_RUN_MAX_S
@@ -369,7 +371,7 @@ class PerceptionPipeline:
             # reset 됐는데 파이프라인이 처음 보는 프레임이 이미 1초를 넘었으면
             # reset 분기를 못 타고 드롭만 영원히 반복한다. 노드는 살아 있고
             # 에러도 없다 — 이 저장소가 반복해서 당한 "조용히 다르게 동작"
-            # 이다(docs/README.md 3-1). LE_REJECT_STREAK 이 같은 이유로
+            # 이다. LE_REJECT_STREAK 이 같은 이유로
             # "유한이 아니라 상계" 였다.
             #
             # 상계에 닿으면 시계가 실제로 옮겨간 것으로 결론내고 reset 한다.

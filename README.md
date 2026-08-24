@@ -53,8 +53,11 @@ flowchart LR
 
 Running the 848M-parameter SAM 3 on every frame caps throughput at ~3 FPS.
 The hybrid scheme runs it only on keyframes (default: every 5th frame) and tracks
-masks with optical flow in between, reaching **~9 FPS** on an RTX 4070 Ti —
-while the 3D pose is still recomputed **every frame** from that frame's real depth.
+masks with optical flow in between, reaching **7.7–12.4 FPS inside the pipeline**
+on an RTX 4070 Ti (`image_size` 1008, `detect_interval` 5; bag decode and mp4
+encoding are excluded — they are 28–30% of the offline runner's wall time and do
+not exist in the ROS node) — while the 3D pose is still recomputed **every frame**
+from that frame's real depth.
 
 Since OBB axes are arbitrary up to permutation and sign, the stabilizer matches each
 new OBB against the previous frame's axes, ignores sub-2° jitter (deadband), and
@@ -87,7 +90,7 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 | Center jitter (static objects) | ≤ 1.5 mm std *(within a run; the support plane is fitted once and cached, so plane error does not appear in this figure — run-to-run plane spread is 0.40 mm on the Isaac scene and 13 mm on test2)* |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
 | Occlusion robustness (hand/object passing over, 29 events) | IDs survive all occlusions; stale poses suppressed; pose resumes ≈ 0.3 s (median) after reappearance |
-| Throughput (3 prompts, RTX 4070 Ti) | ~9 FPS |
+| Pipeline throughput (RTX 4070 Ti, `image_size` 1008, `detect_interval` 5) | 7.7 / 8.5 / 10.1 / 12.4 FPS on test2 / test5 / test4 / isaac — measured from CSV `proc_ms`, i.e. bag decode and mp4 encoding excluded (`docs/detect_interval_2026-08-21.md`) |
 
 ## Requirements
 
@@ -188,15 +191,13 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 | `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, geometric OBB pose, size, covariance — in the camera optical frame reported by `camera_info` |
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
-| `/perception/status` | `diagnostic_msgs/DiagnosticArray` | 1 Hz RGB-D heartbeat: CameraInfo/input-contract validity, last-frame age, last processing duration, and out-of-order-frame drops; `ERROR` for contract failures, `WARN` for absent/stale input |
 
 **Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
 `publish_world_tf` (false — never enable this nominal RViz-only TF for robot
 coordinates; supply a calibrated camera-to-world/base TF externally instead),
-`input_qos_depth` (1 — keep only the newest RGB/depth image per stream when
-inference is slower than the camera), `use_sim_time` (false for normal
-camera/bag launches; `isaac.launch.py` sets it true for both perception and RViz)
+`use_sim_time` (false for normal camera/bag launches; `isaac.launch.py` sets it
+true for both perception and RViz)
 
 `score_threshold` (0.4) is **not** a publish threshold. The detector itself
 returns everything above `min(0.1, score_threshold)`; the value only decides

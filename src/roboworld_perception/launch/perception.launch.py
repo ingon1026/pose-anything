@@ -38,7 +38,6 @@ def generate_launch_description():
         DeclareLaunchArgument("stale_timeout", default_value="5.0"),
         DeclareLaunchArgument("sync_slop", default_value="0.05"),
         DeclareLaunchArgument("sync_queue_size", default_value="1"),
-        DeclareLaunchArgument("input_qos_depth", default_value="1"),
         DeclareLaunchArgument("publish_score_min", default_value="0.0"),
         DeclareLaunchArgument("enable_merge", default_value="true"),
         # 아래 둘은 2026-08-21 도입, 실측 근거는 docs/belt_plane_2026-08-21.md
@@ -94,8 +93,6 @@ def generate_launch_description():
                     LaunchConfiguration("sync_slop"), value_type=float),
                 "sync_queue_size": ParameterValue(
                     LaunchConfiguration("sync_queue_size"), value_type=int),
-                "input_qos_depth": ParameterValue(
-                    LaunchConfiguration("input_qos_depth"), value_type=int),
                 "publish_score_min": ParameterValue(
                     LaunchConfiguration("publish_score_min"), value_type=float),
                 "enable_merge": ParameterValue(
