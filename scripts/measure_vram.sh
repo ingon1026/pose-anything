@@ -11,8 +11,11 @@
 set -u
 export FASTDDS_BUILTIN_TRANSPORTS='LARGE_DATA?max_msg_size=190KB&sockets_size=200KB&non_blocking=true&tcp_negotiation_timeout=50'
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# ROS setup.bash 는 미정의 변수를 참조한다 — 이 구간만 set -u 를 푼다
+set +u
 source /opt/ros/jazzy/setup.bash
 source "$(dirname "$0")/../install/setup.bash" 2>/dev/null || true
+set -u
 OUT=${1:-/tmp/vram_$(date +%H%M%S)}; mkdir -p "$OUT"
 TOPIC=/camera/camera/color/image_raw
 
