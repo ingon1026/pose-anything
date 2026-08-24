@@ -20,6 +20,16 @@ from .geometry import (MAX_THICKNESS, compute_obb, fit_plane,
 from .tracker import IouTracker, depth_intrusion
 
 NOMINAL_DT = 1 / 15  # s — 공칭 프레임 주기 (스탬프 없을 때의 합성용)
+# 이보다 작은 역행은 ROS 전송/clock 샘플링의 미세한 순서 뒤바뀜으로 본다.
+# 그보다 큰 역행은 Isaac reset 등의 새 run 이다. 기존 track 을 살리면
+# Track.fresh 의 ``now - last_accept_t`` 가 음수가 되어 과거 pose 를 fresh 로
+# 오인할 수 있으므로, 새 프레임을 처리하기 전에 상태를 전부 비운다.
+STAMP_RESET_BACKWARD_S = 0.5
+# Isaac의 resetOnStop은 sim time을 0에서 다시 시작한다. 처리 지연이나
+# BEST_EFFORT 전송 때문에 늦게 도착한 RGB-D 쌍도 수백 ms~수 초 역행할 수
+# 있으므로, 단순 역행만으로 run을 갈아엎으면 정상 bag 재생이 매 프레임
+# 재시드된다. 새 run의 시작 구간(0초 부근)으로 돌아온 경우만 reset으로 본다.
+STAMP_RESET_NEW_RUN_MAX_S = 1.0
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
 
@@ -226,7 +236,31 @@ def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
     for d in detections:
         union |= d["mask"].astype(np.uint8)
     ring = cv2.dilate(union, np.ones((ring_px, ring_px), np.uint8)) & ~union
-    return fit_plane(depth, K, depth_scale, mask=ring.astype(bool))
+    m = ring.astype(bool)
+    # 조인 문턱을 먼저 시도하고, 그 씬이 못 버티면 현행 6mm 로 폴백한다.
+    #
+    # 왜: dist_thresh 는 링 오염이 평면을 끌고 갈 수 있는 폭의 상계다. 좁히면
+    # 편향과 실행 간 변동이 같이 준다 — Isaac 실측(참 벨트면 1000.0mm,
+    # isaac_sim_connection_2026-08-13 §2, repeats=21):
+    #     12mm -> d 1004.6 (+4.6)   6mm -> 1002.7 (+2.7)
+    #      3mm -> d 1001.5 (+1.5)   2mm -> 1001.0 (+1.0)
+    # 참값 쪽으로 단조 감소하고 Δ(6->3mm)=-1.26mm 가 실행 간 산포 0.95mm 를
+    # 넘는다 — 노이즈 밖이다. 두께 오차가 여기서 온다(상면 판독은 -0.5mm 로
+    # 이미 정확하다). docs/belt_plane_2026-08-21.md 의 씬 정답 표 참고.
+    #
+    # **왜 기본값을 안 바꾸고 폴백인가**: 문턱을 좁히면 인라이어 비율도 같이
+    # 내려간다. 실측(repeats=21) — Isaac 은 3mm 에서 0.513 으로 여유가 있고
+    # fit_plane 이 21 번 중 0 번 실패하는데, test2/test4 는 0.238/0.243 으로
+    # 하드 문턱 0.3 아래라 **21/21 전부 None 을 낸다.** 기본값을 3mm 로
+    #내렸으면 평면 구속 default-on 의 근거였던 두 씬이 에러 없이 무구속으로
+    # 뒤집혔을 것이다. 저장소 테스트는 이걸 못 잡는다 — test_geometry 의 링이
+    # 잡음 0 평탄면이라 어떤 문턱에서도 같은 답을 낸다.
+    #
+    # 3mm 가 하한이다. 그보다 좁히면 단차 2mm 급 오염은 어차피 인라이어라
+    # 편향이 안 줄고(+0.77 -> +0.69mm) 인라이어 비율만 깎인다. 더 낮추려면
+    # 문턱이 아니라 로버스트 가중(Tukey/IRLS)으로 가야 한다.
+    return (fit_plane(depth, K, depth_scale, mask=m, dist_thresh=0.003)
+            or fit_plane(depth, K, depth_scale, mask=m))
 
 
 class PerceptionPipeline:
@@ -282,6 +316,24 @@ class PerceptionPipeline:
         self.tracker.reset()
         self._reset_run_state()
 
+    def time_reset_required(self, stamp_s):
+        """Whether ``stamp_s`` belongs to a new, reset clock run.
+
+        Kept public because the ROS node must withdraw its last published
+        Detection3DArray *before* the next expensive detector invocation.
+        ``process`` enforces the same rule for the offline entry point.
+        """
+        return (self._last_stamp is not None
+                and self._last_stamp > STAMP_RESET_NEW_RUN_MAX_S
+                and stamp_s <= STAMP_RESET_NEW_RUN_MAX_S
+                and stamp_s < self._last_stamp - STAMP_RESET_BACKWARD_S)
+
+    def late_frame_drop_required(self, stamp_s):
+        """Whether an out-of-order frame must be ignored without rewinding state."""
+        return (self._last_stamp is not None
+                and stamp_s < self._last_stamp - STAMP_RESET_BACKWARD_S
+                and not self.time_reset_required(stamp_s))
+
     def process(self, rgb, depth, K, prompts, stamp_s=None):
         """반환: 이 프레임의 트랙 목록(가림 트랙 포함 — 표시용).
 
@@ -294,6 +346,14 @@ class PerceptionPipeline:
         """
         if stamp_s is None:
             stamp_s = (self._last_stamp or 0.0) + NOMINAL_DT
+        elif self.time_reset_required(stamp_s):
+            # /clock reset: 과거 run의 filter·last_accept_t·광학흐름을 새
+            # 시간축에서 재사용하면 stale pose가 다시 publishable 해진다.
+            # reset() 은 detector/노브와 직접 주입한 belt plane은 보존한다.
+            self.reset()
+        elif self.late_frame_drop_required(stamp_s):
+            # 지연 프레임이 filter/track의 시간을 과거로 되돌리지 못하게 한다.
+            return []
         dt = (stamp_s - self._last_stamp) if self._last_stamp is not None \
             else NOMINAL_DT
         self._last_stamp = stamp_s
@@ -383,10 +443,17 @@ class PerceptionPipeline:
                                                self.depth_scale, track.box)):
                 continue
             flow = propagate_mask(self._prev_gray, gray, track.mask, track.box)
-            if flow is not None:
-                dx, dy = flow
-                track.mask = _shift_mask(track.mask, dx, dy)
-                track.box = track.box + np.array([dx, dy, dx, dy])
+            if flow is None:
+                # 흐름 일관성 검증에 실패한 이전 mask는 **현재 관측이 아니다**.
+                # 여기서 그대로 depth를 다시 3D화하면 가려진/떠난 mask가
+                # last_accept_t를 계속 새로 써 stale pose를 발행하게 된다.
+                # 표시용 마지막 pose는 keyframe 재검출 전까지 남기되, 관측
+                # 융합과 freshness 갱신은 하지 않는다.
+                out.append(track)
+                continue
+            dx, dy = flow
+            track.mask = _shift_mask(track.mask, dx, dy)
+            track.box = track.box + np.array([dx, dy, dx, dy])
             self._update_geometry(track, depth, K)
             out.append(track)
         return self._with_frozen(out)
