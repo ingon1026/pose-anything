@@ -44,7 +44,7 @@
 ### 데이터셋
 | 문서 | 요지 |
 |---|---|
-| [datasets.md](datasets.md) | bag 목록·실측 사실·**권장 프롬프트**·필요한 데이터 |
+| [datasets.md](datasets.md) | bag 목록·실측 사실·**권장 프롬프트**·필요한 데이터. **"게이트 불변식" 절 — 어휘를 바꾸기 전에 `publish_score_min` 과의 관계를 숫자로 확인할 것** |
 
 ### 의사결정
 | 문서 | 요지 |
@@ -64,7 +64,7 @@
 | `image_size` | 기본 1008, **Isaac 672** | [image_size](image_size_2026-08-21.md) ③ — 근거는 VRAM 이 아니라 **속도**. **라이브 재측정으로 확인(4.98 vs 2.68 Hz, −46.1%)** — 큐 변경 이후·전제 검사 통과 |
 | `MAX_THICKNESS` | 0.35m | `aaf9993`. 비율 규칙은 세운 원통에서 깨진다 |
 | `LE_REJECT_STREAK` | 3 | `a65e273`. extent 기각 탈출을 "유한" 이 아니라 **상계**로 |
-| `pub_score_min` | 기본 0, **Isaac 0.6** | [datasets](datasets.md) 권장 프롬프트 절 — 어휘가 약하면 이 게이트에 물체가 통째로 날아간다 |
+| `pub_score_min` | 기본 0, **Isaac 0.6** ⚠ | [datasets](datasets.md) "게이트 불변식" 절 — **채택 어휘에서도 정상 블록 최저 score 가 0.102(merge on 0.112)까지 내려간다. 0.6 은 조각을 0프레임 막으면서 정상 90프레임을 자른다.** 어휘 강화로 해결되지 않는다(권장 `beige notebook` 조차 p10 0.59). **Isaac 값 0.6 → 0.0 변경 대기 중** |
 | TensorRT | **보류** | [tensorrt_deploy](tensorrt_deploy_2026-08-21.md) — vision 이 SAM3 의 57% 라 체감 상한 1.2배 |
 
 **권장 프롬프트**([datasets.md](datasets.md)): `gray notebook`→`beige notebook`,
@@ -123,6 +123,11 @@
 | `PUB_POS_STD_MAX` (현 0.02) | σ↔오차 표는 있다. 커버리지 40~47% 를 잃고 오염을 1/3 로 줄이는 교환 | [publish_gap](publish_gap_2026-08-24.md) |
 | 경계 물체 발행 정책 | 3갈래 — 치수만 불신 / `covariance` 로 알림 / 발행 안 함 | [truncation_unify](truncation_unify_2026-08-24.md), [border_margin](border_margin_2026-08-21.md) |
 | `image_size` 672 vs 1008 | 속도(**4.98 vs 2.68 Hz, −46.1%** — 라이브 유효 측정) ↔ **폭** 3.0mm(정답 55.0 대비 −8.2 vs −5.2). 두께는 무관 | [image_size](image_size_2026-08-21.md) ③④ |
+
+### 값 변경 대기 — 근거는 나왔고 파일만 안 고쳤다
+| 항목 | 상태 | 출처 |
+|---|---|---|
+| **`isaac.launch.py` 의 `publish_score_min=0.6` → `0.0` 권고** | 근거 확정(실측). **값 변경은 사용자가 직접** — 그때까지 Isaac 은 계속 0.6 으로 돌고 **정상 블록 90프레임을 자른다**(조각 차단은 0). 조각을 없앤 것은 이 게이트가 아니라 **이미 켜져 있는 `enable_merge=true`** 이므로, 0.0 으로 내려도 조각이 돌아오지 않는다 | [datasets](datasets.md) "게이트 불변식" |
 
 ### 측정하면 답이 나오는 것
 | 항목 | 출처 |
@@ -216,6 +221,13 @@
   18회 실패 후 19번째에 "성공" 해 결과가 파탄난 적이 있다(pink block 발행
   336→168, size_std 6.7→104.9mm: [belt_plane](belt_plane_2026-08-21.md) test3 절).
   지금의 PASS 를 **"test3 은 안전하다" 로 읽지 말 것**
+- **게이트를 켜고 뽑은 CSV 로는 그 게이트를 다시 정할 수 없다.**
+  `scripts/run_offline.py:249` 가 `if not o.publishable: continue` 로 거르므로
+  **게이트에 걸린 행이 CSV 에 아예 안 남는다** — 질문이 사는 자리가 잘려 나간다.
+  `publish_score_min` 을 재검토하려면 반드시 **`--publish-score-min 0.0` 으로
+  뽑고 `score` 컬럼으로 오프라인 재적용**할 것. (같은 부류: `analyze_divergence.py`
+  가 상대 `sys.path` 로 `build/` 사본을 import 하던 건 — **분석 도구가 조용히
+  다른 것을 재고 있는지 먼저 의심할 것**)
 - **오프라인 러너 FPS 는 성능 지표가 아니다** — mp4 인코딩·bag 디코딩이 28~30%.
   파이프라인 내부는 CSV 의 `proc_ms` 로 볼 것
 - [belt_plane](belt_plane_2026-08-21.md) 의 "켜기 전에 필요한 검증" 절은
