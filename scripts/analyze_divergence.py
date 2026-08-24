@@ -14,10 +14,15 @@ dt 가 되는데, 필터는 dt 를 0.5s 로 clip 하므로 시간이 어긋나 �
 """
 import csv
 import sys
+from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, "src/roboworld_perception")
+# 상대 경로로 두면 cwd 가 저장소 루트가 아닐 때 조용히 무효가 되고 설치된
+# build/ 사본이 import 된다 — "고친 코드 != 실행된 코드". run_offline.py 와
+# 같은 형태로 파일 위치에서 절대 경로를 만든다.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]
+                       / "src" / "roboworld_perception"))
 from roboworld_perception.fusion import TrackFilter, pos_r_extra  # noqa: E402
 
 WINDOW = 12          # 슬라이딩 창 길이(프레임) — 키프레임 주기 5 의 배수

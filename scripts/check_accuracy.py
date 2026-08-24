@@ -29,6 +29,17 @@ import numpy as np
 # 반복 실행으로는 문턱을 못 잡는다. 그래서 문턱의 기준은 "이 파이프라인이
 # 이미 갖고 있는 프레임간 지터(σ)"로 둔다 — 그보다 작은 차이는 회귀라고
 # 부를 근거가 없고, 그보다 크면 강등이 새로 만든 차이다.
+#
+# ⚠ 이 "잡음 바닥 0" 은 test2_free 에서만 확인됐다 — **무구속 경로라
+# fit_plane 을 안 탄다.** 평면 구속 경로(use_belt_plane, 현재 기본 켜짐)에서는
+# 0 이 아니다: geometry.fit_plane 의 segment_plane(dist_thresh, 3, 200) 이
+# 시드 없는 RANSAC 이고, pipeline 이 그 평면을 실행당 한 번만 맞춰 영구
+# 캐시하므로(_plane_tried) 평면 오차가 실행 간에 흔들리면서 프레임간 σ 에는
+# 안 잡힌다. 두께 기준 실행 간 변동 폭이 약 0.55mm 로 측정됐다.
+# 지금은 아래 ABS_FLOOR_MM=2.0 이 그 변동을 덮어 판정이 안전하다.
+# **ABS_FLOOR_MM 을 낮추려면 평면 변동을 먼저 재서 그 아래로 내려가지 않게 할 것**
+# (같은 조건을 여러 번 돌려 분포를 본다). 근거: docs/README.md §5 "std 는
+# 재현성이 아니다", docs/belt_plane_2026-08-21.md.
 SIGMA_K = 3.0        # 기준 실행 σ 의 몇 배까지 허용할지. depth_intrusion 이
                      # χ²(0.999,1)=3.29σ 를 쓰는 것과 같은 자릿수다.
 # 절대 하한. σ 가 0.2mm 급인 축에서 3σ 를 그대로 쓰면 물리적으로 무의미한
@@ -98,7 +109,11 @@ def apparent_px(rows, fx):
     """겉보기 최단축 크기(px) — 소물체 관문에 들어가는지 판정용."""
     ext = np.array([sorted_extent(r) for r in rows.values()])
     z = np.array([float(r["z"]) for r in rows.values()])
-    return float(np.median(ext[:, 1] / z)) * fx  # 정렬 2번째 = 관측 평면 단축
+    # 정렬 extent 의 2번째 = 중간축. 두께 < 폭 인 납작한 물체에서는 이것이
+    # 관측 평면의 단축이지만, **두께 > 폭 인 물체에서는 두께다** — isaac 블록
+    # [195, 58, 47] 이 그 경우로, 여기서는 47(폭)이 아니라 58(두께)을 돌려준다.
+    # 소물체 관문 판정에 쓸 때 그 물체가 어느 쪽인지 확인할 것.
+    return float(np.median(ext[:, 1] / z)) * fx
 
 
 def compare_label(ref, cand):
