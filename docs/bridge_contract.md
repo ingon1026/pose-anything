@@ -126,12 +126,76 @@ ros2 topic hz /perception/detections  -> 4.0 Hz
 
 1. 전송 설정이 그 프로세스에 있는가 (1.1)
 2. Isaac 이 재시작됐는가 (1.3)
-3. `topic hz` 로 실제 흐름 확인 (3.1)
-4. 그래도면 브리지 쪽에 문의
+3. **퍼블리셔 수를 먼저 본다** — `ros2 topic info <토픽>` 의 `Publisher count`
+4. `topic hz` 로 실제 흐름 확인 (3.1)
+5. 그래도면 브리지 쪽에 문의
+
+**`topic list` 에 이름이 보인다고 발행자가 있는 것이 아니다.** 우리 쪽 노드가
+**구독만 해도** 그 토픽은 목록에 뜬다. 2026-08-24 에 이걸 몰라서 "토픽은 보이는데
+데이터가 안 온다"를 전송 설정 문제로 오인하고 시간을 썼다 — 실제로는 Isaac 의
+ROS 2 브리지가 Windows 방화벽에 차단당해 죽어 **퍼블리셔가 0개**였다.
+
+```bash
+ros2 topic info /camera/camera/color/image_raw
+# Publisher count: 0  ← 브리지가 죽었다. 비전 쪽에서 고칠 수 있는 것이 없다
+# Publisher count: 1  ← 발행자는 있다. 그때부터 전송 설정(1.1)을 의심한다
+```
+
+`Publisher count: 0` 이면 **위 1~2 번을 확인할 필요가 없다.** 바로 브리지 쪽 문의다.
 
 **VRAM 을 먼저 의심하지 말 것.** 2026-08-19 에 그러다 반나절을 썼다.
 
 ---
+
+### 3.4 퍼블리셔가 0개면 Windows 가 브리지를 차단한 것이다 (2026-08-24)
+
+토픽 목록에 이름이 보이는 것만으로는 아무것도 증명되지 않는다. 이름은
+**구독자만 있어도** 뜬다. 반드시 발행자 수를 볼 것:
+
+```bash
+ros2 topic info -v /camera/camera/color/image_raw | head -5
+#   Publisher count: 0     <- Isaac 이 발행하지 않고 있다
+```
+
+0 이면 Play 여부나 전송 설정 문제가 아니다. **Windows Smart App Control** 이
+Isaac 번들 ROS 2 바이너리를 차단했는지부터 볼 것. NVIDIA 가 넣은 rmw/rcl DLL 에
+Microsoft 가 신뢰하는 서명이 없어서 커널이 로딩을 막는다.
+
+Windows 쪽 확인 (관리자 권한 없이도 읽힌다):
+
+```powershell
+(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy').VerifiedAndReputablePolicyState
+#   0=꺼짐   1=적용중(차단)   2=평가모드
+
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-CodeIntegrity/Operational'; Id=3077} |
+  Where-Object { $_.Message -match 'isaacsim' }
+```
+
+Isaac 로그에는 이렇게 남는다:
+
+```
+[ext: isaacsim.ros2.core-1.9.4] Failed to startup python extension.
+OSError: [WinError 4551] 애플리케이션 제어 정책에서 이 파일을 차단했습니다
+/ROS2_Camera/Info: Assertion raised in compute - No module named 'sensor_msgs'
+/ROS2_Clock/PublishClock: Unable to create ROS2 node, please check that namespace is valid
+```
+
+주의할 점 — 이 경우 §1.1 전송 설정도 §4.2 환경변수도 **전부 정상인데** 안 된다.
+2026-08-24 에 ROS_DISTRO=jazzy, RMW_IMPLEMENTATION=rmw_fastrtps_cpp, PATH 에
+jazzy\lib 까지 모두 들어간 상태에서 막혔다. 환경변수를 의심하는 데 시간을 쓰지 말 것.
+
+Smart App Control 은 예외 목록이 없다. 끄는 방법뿐이고 한 번 끄면 Windows 를
+재설치하기 전까지 다시 켤 수 없다.
+
+**같은 파일이라도 날마다 판정이 뒤집힌다.** SAC 는 클라우드 평판으로 판단하므로
+어제 통과한 DLL 이 오늘 막힐 수 있다. 실제 기록(이 PC):
+
+    08-13  빌드 직후    차단   (평판 없음)
+    08-19  ~ 08-21      통과   (39 Hz 로 정상 동작한 날들)
+    08-24               차단   (다시 막힘)
+
+그러니 "코드를 안 건드렸는데 어제 되던 게 오늘 안 된다" 면 이것부터 볼 것.
+정책이 바뀐 흔적(이벤트 3099)이 없어도 막힐 수 있다 — 파일 평판만 뒤집히면 된다.
 
 ## 4. 브리지 쪽에 요청해야 하는 것
 
