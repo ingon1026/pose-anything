@@ -78,11 +78,12 @@ def test_plane_fit_is_attempted_only_once(monkeypatch):
     """
     from roboworld_perception import pipeline as P
     tries = []
-    # 반환은 (plane, 쓰인 dist_thresh) 다 — 폴백이 3mm 로 붙었는지 6mm 로
-    # 떨어졌는지가 두께를 ~1.3mm 바꾸는데 실행 간 산포(±0.40mm)보다 커서,
-    # 로그에 남기지 않으면 두 실행이 같은 문턱을 썼는지 확인할 방법이 없다.
+    # 반환은 (plane, 쓰인 dist_thresh, 진단값 dict) 다 — 폴백이 3mm 로 붙었는지
+    # 6mm 로 떨어졌는지가 두께를 ~1.3mm 바꾸는데 실행 간 산포(±0.40mm)보다
+    # 커서, 로그에 남기지 않으면 두 실행이 같은 문턱을 썼는지 확인할 방법이
+    # 없다. dict 를 비워 두면 로그가 nan 을 찍는 경로(점 부족)까지 같이 탄다.
     monkeypatch.setattr(P, "_fit_support_plane",
-                        lambda *a, **kw: (tries.append(1), (None, None))[1])
+                        lambda *a, **kw: (tries.append(1), (None, None, {}))[1])
     pipe = P.PerceptionPipeline(StubDetector(), detect_interval=5,
                                 use_belt_plane=True)
     depth = np.full((240, 320), 1000, np.uint16)

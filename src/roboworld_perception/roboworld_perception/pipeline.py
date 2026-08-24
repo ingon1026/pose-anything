@@ -262,11 +262,17 @@ def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
     # 3mm 가 하한이다. 그보다 좁히면 단차 2mm 급 오염은 어차피 인라이어라
     # 편향이 안 줄고(+0.77 -> +0.69mm) 인라이어 비율만 깎인다. 더 낮추려면
     # 문턱이 아니라 로버스트 가중(Tukey/IRLS)으로 가야 한다.
+    #
+    # stats 는 로그용 진단값만 받는다(판정 무관, geometry.fit_plane 주석 참고).
+    # 성공하면 성공한 시도의 값, 전부 실패하면 마지막(= 더 관대한 6mm) 시도의
+    # 값이 남는다 — 실패 원인을 보려면 그쪽이 정보량이 많다.
     for thr in (0.003, 0.006):
-        plane = fit_plane(depth, K, depth_scale, mask=m, dist_thresh=thr)
+        stats = {}
+        plane = fit_plane(depth, K, depth_scale, mask=m, dist_thresh=thr,
+                          stats=stats)
         if plane is not None:
-            return plane, thr
-    return None, None
+            return plane, thr, stats
+    return None, None, stats
 
 
 class PerceptionPipeline:
@@ -427,7 +433,7 @@ class PerceptionPipeline:
                 # 통과한 평면으로 pink block 발행이 336 -> 168 프레임,
                 # size_std 가 6.7 -> 104.9mm 로 파탄났다.
                 self._plane_tried = True
-                self.belt_plane, self._plane_thr = _fit_support_plane(
+                self.belt_plane, self._plane_thr, st = _fit_support_plane(
                     strong, depth, K, self.depth_scale)
                 # 단발 추정 후 영구 캐시다. 조용히 틀린 평면은 두께·중심 z 로만
                 # 드러나 원인을 평면에서 찾지 않게 된다 — 한 줄이라도 남긴다.
@@ -436,9 +442,18 @@ class PerceptionPipeline:
                 # flush 필수 — 없으면 launch 로 띄웠을 때 버퍼에 갇혀
                 # 운영 중 진단이 안 된다(2026-08-24 라이브에서 실제로 못 봤다).
                 # sam3_detector 의 프롬프트 경고가 같은 이유로 flush 를 쓴다.
+                # 인라이어 비율과 잔차 RMS 를 같이 싣는다 — 비율만으로는
+                # 평면이 결정됐는지 알 수 없다(근거는 fit_plane 의 주석).
+                # 실 bag 에서 이 두 값의 분포를 모으는 것이 목적이다.
+                # 조건식 모양을 그대로 둘 것: 실패 시 _plane_thr 가 None 이라
+                # 문자열을 미리 만들면 None*1000 로 죽는다.
                 print(f"[belt_plane] dist_thresh={self._plane_thr*1000:.0f}mm "
+                      f"inlier={st.get('inlier', float('nan')):.3f} "
+                      f"rms={st.get('rms', float('nan'))*1000:.1f}mm "
                       f"{self.belt_plane}" if self.belt_plane
-                      else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행",
+                      else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행 "
+                           f"(inlier={st.get('inlier', float('nan')):.3f}, "
+                           f"rms={st.get('rms', float('nan'))*1000:.1f}mm)",
                       flush=True)
         for d in detections:  # 매칭 비용(depth 충돌 배제)이 쓸 depth를 1회만 계산
             d["z"] = masked_depth_median(d["mask"], depth, self.depth_scale,

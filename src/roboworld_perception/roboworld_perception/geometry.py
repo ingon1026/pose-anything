@@ -160,7 +160,7 @@ def _backproject(depth, K, depth_scale, stride, z_range, mask=None):
 
 def fit_plane(depth, K, depth_scale=0.001, mask=None, stride=2,
               z_range=(0.10, 3.0), dist_thresh=0.006, min_inlier_ratio=0.3,
-              band=0.050):
+              band=0.050, stats=None):
     """지지 평면(= 물체가 놓인 벨트면) → (n, d), n·p + d = 0, |n| = 1.
 
     n 은 카메라 쪽을 향한다(광학 좌표계에서 n[2] < 0). 인라이어가
@@ -178,6 +178,9 @@ def fit_plane(depth, K, depth_scale=0.001, mask=None, stride=2,
     클립 후 test2 0.42 / test4 0.41 로 통과하고, test3(손밀기 롤러)은 0.27 로
     떨어진다. test3 은 실제로 링이 한 장의 평면이 아니라 추정 파라미터에 따라
     기울기가 2.9~8.2° 로 흔들리는 씬이라, 여기서 걸러지는 것이 의도한 동작이다.
+
+    stats 로 dict 를 주면 진단값을 채워 준다(관측용, 판정에는 안 쓴다) —
+    "inlier"(= 게이트가 보는 그 비율), "rms"(인라이어 잔차 RMS, m).
     """
     pts = _backproject(depth, K, depth_scale, stride, z_range, mask)
     if len(pts) < 500:
@@ -188,6 +191,27 @@ def fit_plane(depth, K, depth_scale=0.001, mask=None, stride=2,
         return None
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
     model, inliers = pcd.segment_plane(dist_thresh, 3, 200)
+    if stats is not None:
+        # 관측만 한다 — 게이트는 아래 min_inlier_ratio 그대로다.
+        #
+        # 왜 재나: 인라이어 비율은 평면 품질과 사실상 무상관이다. 합성 29표본
+        # 에서 |편향| 과의 상관이 비율 +0.066(무상관), 잔차 RMS +0.652,
+        # 반복 간 불일치 +0.486. 기전 — 6mm 슬랩은 폭 60~100mm 링에서
+        # ±3.4~5.7° 기울기를 인라이어 손실 거의 없이 허용한다. 비율은
+        # "점이 몇 개 붙었나"이지 "평면이 결정됐나"가 아니다. 실증: test2 는
+        # 0.408 로 문턱 0.30 을 통과하는데 실행 간 d 산포가 ±13.1mm 다
+        # (repeats=21). Isaac ±0.40mm, test4 ±2.98mm — 씬마다 자릿수가 다르다.
+        #
+        # **그런데도 게이트를 RMS 로 안 바꾼 이유**: 표본이 29개(나쁜 클래스
+        # 6개)뿐이고 RMS>1.5mm 동작점의 오탈락이 39% 다. 실 bag 에서 이
+        # 로그로 분포를 모으기 전에는 문턱을 정할 근거가 없다. 여기 상수를
+        # 박기 전에 표본부터 세라.
+        #
+        # 분모는 클립 후 len(pts) — 게이트가 나누는 그 값이라야 위 수치들과
+        # 비교된다. model 은 단위 법선이라 |p·n + d| 가 곧 미터 거리다.
+        stats["inlier"] = len(inliers) / len(pts)
+        stats["rms"] = float(np.sqrt(np.mean(
+            (pts[inliers] @ np.asarray(model[:3], float) + model[3]) ** 2)))
     if len(inliers) < min_inlier_ratio * len(pts):
         return None
     n, d = np.asarray(model[:3], float), float(model[3])
