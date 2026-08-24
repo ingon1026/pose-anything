@@ -10,6 +10,11 @@ services:
     environment:
       - HF_TOKEN              # gated facebook/sam3 다운로드용 (호스트 env 전달)
       - DISPLAY=${DISPLAY:-:0}
+      # 계약서 §1.1. 컨테이너에는 호스트 .bashrc 가 없어 상속받을 곳이 아예 없다 —
+      # 위 network_mode: host 로 호스트 ROS 노드와 DDS 로 붙는데 이게 없으면
+      # 기본 UDP 가 되어 에러 없이 데이터가 안 온다. scripts/ros_env.sh 와 같은 값.
+      - FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA?max_msg_size=190KB&sockets_size=200KB&non_blocking=true&tcp_negotiation_timeout=50
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
     volumes:
       - ${HF_HOME:-~/.cache/huggingface}:/cache/hf   # 모델 캐시 (재다운로드 방지)
       - ./bags:/ws/bags

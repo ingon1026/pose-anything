@@ -9,8 +9,7 @@
 #
 # 사용: bash scripts/measure_vram.sh [출력디렉토리]
 set -u
-export FASTDDS_BUILTIN_TRANSPORTS='LARGE_DATA?max_msg_size=190KB&sockets_size=200KB&non_blocking=true&tcp_negotiation_timeout=50'
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+source "$(dirname "$0")/ros_env.sh"
 # ROS setup.bash 는 미정의 변수를 참조한다 — 이 구간만 set -u 를 푼다
 set +u
 source /opt/ros/jazzy/setup.bash

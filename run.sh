@@ -40,6 +40,9 @@ echo ">> 소스: $SOURCE | 물체: $PROMPTS | threshold: $THRESHOLD"
 mkdir -p output
 
 source install/setup.bash
+# 전송 설정. .bashrc 는 대화형 셸에서만 읽혀서, 손으로 치면 상속으로 통과하고
+# cron·systemd·wsl -e bash -lc 에서만 조용히 죽는다 — scripts/ros_env.sh 주석 참고
+source "$(dirname "$0")/scripts/ros_env.sh"
 
 # 이전 실행이 남긴 perception 노드 정리 — 노드가 쌓이면 GPU에 SAM3가
 # 중복 상주해 전체가 심하게 느려진다 (실측: 노드 4개 → 12GB 포화)
