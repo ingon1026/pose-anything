@@ -34,7 +34,8 @@ reappears — same track IDs throughout.</sub>
 
 <sub>**Moving conveyor, three text prompts** (`블록`/block, `책`/book, `장갑`/glove) — each object keeps
 a single track ID for the entire 20-second sequence with zero axis flips. Estimated OBB sizes
-match the real objects within ±1 cm.</sub>
+are self-consistent across frames; absolute size is validated only on the Isaac
+scene, where the USD model gives ground truth (docs/image_size_2026-08-21.md).</sub>
 
 ## How it works
 
@@ -81,8 +82,9 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 | Metric | Result |
 |---|---|
 | Track ID persistence (3 moving objects, 20 s) | single ID each, 0 axis flips |
-| OBB size vs. real objects | within ±1 cm |
-| Center jitter (static objects) | ≤ 1.5 mm std |
+| OBB size — Isaac scene (USD ground truth 200x55x55 mm) | footprint −4 to −8 mm, thickness +3.2 mm |
+| OBB size vs. real objects (test2/test3) | **not validated** — no measured ground truth for those bags yet |
+| Center jitter (static objects) | ≤ 1.5 mm std *(within a run; the support plane is fitted once and cached, so plane error does not appear in this figure — run-to-run plane spread is 0.40 mm on the Isaac scene and 13 mm on test2)* |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
 | Occlusion robustness (hand/object passing over, 29 events) | IDs survive all occlusions; stale poses suppressed; pose resumes ≈ 0.3 s (median) after reappearance |
 | Throughput (3 prompts, RTX 4070 Ti) | ~9 FPS |
@@ -183,13 +185,18 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 
 | Topic | Type | Content |
 |---|---|---|
-| `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, pose (center + quaternion + position covariance), size — in the camera optical frame reported by `camera_info` |
+| `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, geometric OBB pose, size, covariance — in the camera optical frame reported by `camera_info` |
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
+| `/perception/status` | `diagnostic_msgs/DiagnosticArray` | 1 Hz RGB-D heartbeat: CameraInfo/input-contract validity, last-frame age, last processing duration, and out-of-order-frame drops; `ERROR` for contract failures, `WARN` for absent/stale input |
 
 **Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
-`publish_world_tf` (true — camera-above-belt TF for RViz; disable when integrating a real robot TF tree)
+`publish_world_tf` (false — never enable this nominal RViz-only TF for robot
+coordinates; supply a calibrated camera-to-world/base TF externally instead),
+`input_qos_depth` (1 — keep only the newest RGB/depth image per stream when
+inference is slower than the camera), `use_sim_time` (false for normal
+camera/bag launches; `isaac.launch.py` sets it true for both perception and RViz)
 
 `score_threshold` (0.4) is **not** a publish threshold. The detector itself
 returns everything above `min(0.1, score_threshold)`; the value only decides
@@ -202,10 +209,14 @@ a track through partial occlusion.
 `publish_score_min` (0.0 = off) is the actual publish gate, for scenes where
 persistent low-score fragments would otherwise reach a consumer. It is an
 absolute threshold, so a track sitting near the value flickers in and out —
-set it well below the scores you expect. `launch/isaac.launch.py` sets 0.4.
+set it well below the scores you expect. `launch/isaac.launch.py` sets 0.6.
 
-What a consumer actually receives (captured from a real run — note the per-axis
-position variance filled in by the fusion filter, ready for confidence-gated grasping):
+What a consumer actually receives (captured from a real run — the per-axis
+position variance is filled in by the fusion filter. The OBB quaternion is for
+geometric visualisation, not a calibrated semantic orientation; its roll,
+pitch, yaw covariance diagonals are conservatively set to \(\pi^2\) rad²
+(180° 1σ), so an orientation-gated grasp must reject it unless a separate
+orientation estimator is added):
 
 ```yaml
 # ros2 topic echo /perception/detections --once   (truncated)
@@ -216,7 +227,7 @@ detections:
       pose:
         position: {x: -0.488, y: 0.053, z: 0.894}
         orientation: {x: -0.112, y: -0.103, z: -0.641, w: 0.753}
-      covariance: [7.7e-05, 0, 0, ...,  2.7e-04, ...,  2.8e-05, ...]  # σx=8.8mm σy=16.5mm σz=5.3mm
+      covariance: [7.7e-05, 0, 0, ..., 2.7e-04, ..., 2.8e-05, ..., 9.87, ..., 9.87, ..., 9.87]  # σxyz=8.8/16.5/5.3mm; σrpy=180° (unestimated)
   bbox: {size: {x: 0.462, y: 0.529, z: 0.180}}
   id: black bag#2
 ```
