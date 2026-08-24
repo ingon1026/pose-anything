@@ -209,7 +209,8 @@ a track through partial occlusion.
 `publish_score_min` (0.0 = off) is the actual publish gate, for scenes where
 persistent low-score fragments would otherwise reach a consumer. It is an
 absolute threshold, so a track sitting near the value flickers in and out —
-set it well below the scores you expect. `launch/isaac.launch.py` sets 0.6.
+set it well below the scores you expect. `launch/isaac.launch.py` carries the
+measurement that decides its value — read that comment before changing it.
 
 What a consumer actually receives (captured from a real run — the per-axis
 position variance is filled in by the fusion filter. The OBB quaternion is for

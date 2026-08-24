@@ -2,7 +2,10 @@ import cv2
 import numpy as np
 
 from conftest import K
-from roboworld_perception.pipeline import PerceptionPipeline, propagate_mask
+from roboworld_perception.pipeline import (PerceptionPipeline,
+                                           STAMP_RESET_BACKWARD_S,
+                                           STAMP_RESET_NEW_RUN_MAX_S,
+                                           propagate_mask)
 
 
 def textured_frame(shift=0):
@@ -75,8 +78,11 @@ def test_plane_fit_is_attempted_only_once(monkeypatch):
     """
     from roboworld_perception import pipeline as P
     tries = []
+    # 반환은 (plane, 쓰인 dist_thresh) 다 — 폴백이 3mm 로 붙었는지 6mm 로
+    # 떨어졌는지가 두께를 ~1.3mm 바꾸는데 실행 간 산포(±0.40mm)보다 커서,
+    # 로그에 남기지 않으면 두 실행이 같은 문턱을 썼는지 확인할 방법이 없다.
     monkeypatch.setattr(P, "_fit_support_plane",
-                        lambda *a, **kw: tries.append(1) or None)
+                        lambda *a, **kw: (tries.append(1), (None, None))[1])
     pipe = P.PerceptionPipeline(StubDetector(), detect_interval=5,
                                 use_belt_plane=True)
     depth = np.full((240, 320), 1000, np.uint16)
@@ -122,21 +128,36 @@ def test_flow_suppression_carries_no_state():
     assert abs(dx - 7) < 1.5
 
 
-def test_suppressed_flow_does_not_withhold_observations():
-    """전파를 보류해도 관측·융합은 계속한다 (교착 불가능성·신선도 보존).
+def test_suppressed_flow_does_not_refresh_pose_and_keeps_display(monkeypatch):
+    """일관성 없는 흐름은 이전 mask를 새 3D 관측으로 재사용하지 않는다.
 
-    보류가 관측까지 끊으면 T_STALE 이 흘러 발행이 멈추고, P 만 자라는 구간이
-    생겨 fusion 설계의 '거부 중에도 게이트가 스스로 열린다'가 무의미해진다.
+    마지막 안전 pose는 keyframe 재검출 전에도 표시하지만, 수락 시각을
+    갱신하면 가려진 물체의 stale pose가 로봇으로 나간다. 따라서
+    T_STALE 뒤 발행은 멈추고 track만 표시용으로 반환해야 한다.
     """
-    pipe = PerceptionPipeline(StubDetector(), detect_interval=5)
+    from roboworld_perception import pipeline as P
+
+    pipe = _plane_pipe()
     depth = np.full((240, 320), 1000, np.uint16)
-    for i in range(4):  # 0=키프레임, 1~3=흐름이 갈라지는 프레임
-        rgb = cv2.cvtColor(two_motion_frame(0, 12 * i), cv2.COLOR_GRAY2RGB)
-        pipe.process(rgb, depth, K, ["obj"], stamp_s=i / 15)
+    depth[100:160, 100:180] = 950
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    # 이 합성 장면은 keyframe에서만 수락되므로 세 keyframe으로 publishable
+    # pose를 만든 뒤, 다음 네 flow 프레임을 실패시킨다.
+    for frame_idx in range(11):
+        pipe.process(rgb, depth, K, ["obj"], stamp_s=10 + frame_idx / 15)
     t = pipe.tracker.tracks[0]
-    assert t.fresh                     # 관측이 계속 들어왔다
-    assert t.last_accept_t == 3 / 15   # 마지막 프레임까지 수락
-    assert np.allclose(t.box, [100, 100, 180, 160])  # 마스크는 안 밀렸다
+    last_accept_t, box_before = t.last_accept_t, t.box.copy()
+    assert t.publishable
+
+    monkeypatch.setattr(P, "propagate_mask", lambda *args: None)
+    for stamp in (10.9, 11.1, 11.3, 11.5):
+        out = pipe.process(rgb, depth, K, ["obj"], stamp_s=stamp)
+        assert out == [t]               # pose는 화면 표시용으로 유지
+
+    assert t.last_accept_t == last_accept_t
+    assert t.n_accepted == 3            # 새 3D 관측으로 세지 않음
+    assert np.array_equal(t.box, box_before)
+    assert not t.fresh and not t.publishable
 def _plane_pipe():
     """벨트를 z=1.0 에 고정한 평면 구속 파이프라인 (캘리브 노브로 직접 주입)."""
     return PerceptionPipeline(StubDetector(), detect_interval=5,
@@ -206,3 +227,74 @@ def test_reset_keeps_a_pinned_belt_plane():
     pipe = PerceptionPipeline(StubDetector(), belt_plane=plane)
     pipe.reset()
     assert pipe.belt_plane is plane
+
+
+def test_material_time_reversal_drops_old_publishable_pose():
+    """새 run의 시간축에서 이전 run pose를 fresh로 되살리지 않는다.
+
+    Track.fresh 는 ``now - last_accept_t`` 를 보므로, /clock 이 0으로
+    되감긴 뒤 기존 트랙을 유지하면 이전에 확정된 pose가 수백 초 동안
+    publishable 로 남는다. 역행 프레임은 먼저 reset한 뒤 새 관측으로만
+    시드해야 하며, M-of-N 확정을 다시 충족할 때까지 발행하면 안 된다.
+    """
+    pipe = _plane_pipe()
+    depth = np.full((240, 320), 1000, np.uint16)
+    depth[100:160, 100:180] = 950
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    # 이 합성 장면은 keyframe에서만 pose가 수락되므로, CONFIRM_N=3을
+    # 만족할 때까지 세 keyframe을 지난다.
+    for frame_idx in range(11):
+        stamp = 10.0 + frame_idx / 15
+        old = pipe.process(rgb, depth, K, ["obj"], stamp_s=stamp)[0]
+    assert old.publishable
+    assert old.last_accept_t == 10.0 + 10 / 15
+
+    out = pipe.process(rgb, depth, K, ["obj"], stamp_s=0.0)
+
+    assert pipe._last_stamp == 0.0
+    assert pipe._frame_idx == 1
+    assert len(pipe.tracker.tracks) == 1
+    assert pipe.tracker.tracks[0] is not old
+    assert pipe.tracker.tracks[0].n_accepted == 1
+    assert not any(track.publishable for track in out)
+
+
+def test_small_stamp_reversal_does_not_reset_run_or_pinned_plane():
+    """clock 샘플의 작은 순서 뒤바뀜은 run reset으로 과민 반응하지 않는다."""
+    plane = (np.array([0.0, 0.0, -1.0]), 1.0)
+    pipe = PerceptionPipeline(StubDetector(), belt_plane=plane,
+                              detect_interval=5)
+    depth = np.full((240, 320), 1000, np.uint16)
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    pipe.process(rgb, depth, K, ["obj"], stamp_s=10.0)
+    original = pipe.tracker.tracks[0]
+
+    pipe.process(rgb, depth, K, ["obj"],
+                 stamp_s=10.0 - STAMP_RESET_BACKWARD_S / 2)
+
+    assert pipe.tracker.tracks[0] is original
+    assert pipe.belt_plane is plane
+
+
+def test_late_nonzero_stamp_is_not_mistaken_for_clock_reset():
+    """지연 전달된 과거 RGB-D 쌍은 새 run이 아니라 버릴 수 있는 입력이다."""
+    pipe = PerceptionPipeline(StubDetector(), detect_interval=5)
+    depth = np.full((240, 320), 1000, np.uint16)
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    pipe.process(rgb, depth, K, ["obj"], stamp_s=12.0)
+    original = pipe.tracker.tracks[0]
+
+    assert not pipe.time_reset_required(8.0)
+    assert pipe.late_frame_drop_required(8.0)
+    assert pipe.process(rgb, depth, K, ["obj"], stamp_s=8.0) == []
+    assert pipe.tracker.tracks[0] is original
+
+
+def test_clock_return_to_new_run_origin_requires_reset():
+    """Isaac resetOnStop의 새 clock origin은 기존 pose를 즉시 무효화한다."""
+    pipe = PerceptionPipeline(StubDetector(), detect_interval=5)
+    depth = np.full((240, 320), 1000, np.uint16)
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    pipe.process(rgb, depth, K, ["obj"], stamp_s=12.0)
+
+    assert pipe.time_reset_required(STAMP_RESET_NEW_RUN_MAX_S)

@@ -28,6 +28,13 @@ v=[int(x) for x in open('$f').read().split()[1:]]
 print(f'[$1] n={len(v)} 최소 {min(v)} 평균 {sum(v)//len(v)} **최대 {max(v)}** MiB')"
 }
 
+teardown() {  # 노드 회수 + 확인. 조기 종료와 정상 종료가 같은 경로를 쓴다.
+  # 패턴을 run.sh 와 맞춘다. 맨 "perception_node" 는 그 문자열이 든 아무
+  # 프로세스나 잡는다 — 실증: pgrep -af perception_node 가 그 단어를 담은
+  # 셸 명령 자신을 매칭했다.
+  pkill -f "roboworld_perception/perception_node" 2>/dev/null; sleep 3
+  echo "회수 후: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"; }
+
 echo "=== 0. 전제 — 발행자가 있는가 ==="
 PUB=$(timeout 15 ros2 topic info $TOPIC 2>/dev/null | grep -oP 'Publisher count: \K\d+')
 echo "Publisher count: ${PUB:-조회실패}"
@@ -47,10 +54,9 @@ echo "SAM3 ready — 추론이 실제로 도는지 확인:"
 # '동시 피크 9,497 MiB' 로 보고했다(실제 8,691). 값이 나와버리면 사람은 쓴다.
 timeout 25 ros2 topic hz /perception/detections 2>&1 | grep -m1 "average rate" || {
   echo "→ 검출 미발행. 이 상태의 VRAM 은 활성화 몫이 빠져 무효다 — 측정을 중단한다."
-  pkill -f perception_node; exit 1; }
+  echo "  ② Isaac 단독 결과는 유효하다: $OUT/isaac_only.csv"
+  teardown; exit 1; }
 
 echo; echo "=== ④ 동시 구동 피크 ==="; sample isaac_plus_sam3 60
 
-echo; echo "=== 정리 ==="
-pkill -f perception_node; sleep 3
-echo "회수 후: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+echo; echo "=== 정리 ==="; teardown

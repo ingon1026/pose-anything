@@ -30,6 +30,9 @@ STAMP_RESET_BACKWARD_S = 0.5
 # 있으므로, 단순 역행만으로 run을 갈아엎으면 정상 bag 재생이 매 프레임
 # 재시드된다. 새 run의 시작 구간(0초 부근)으로 돌아온 경우만 reset으로 본다.
 STAMP_RESET_NEW_RUN_MAX_S = 1.0
+# 지연 프레임 드롭의 상계. 드롭은 _last_stamp 를 전진시키지 않으므로
+# 무한이면 락아웃이 된다 — process() 의 해당 분기 주석 참고.
+LATE_DROP_STREAK_MAX = 30
 
 # ── 공유 헬퍼 ──────────────────────────────────────────────
 
@@ -259,8 +262,11 @@ def _fit_support_plane(detections, depth, K, depth_scale, ring_px=21):
     # 3mm 가 하한이다. 그보다 좁히면 단차 2mm 급 오염은 어차피 인라이어라
     # 편향이 안 줄고(+0.77 -> +0.69mm) 인라이어 비율만 깎인다. 더 낮추려면
     # 문턱이 아니라 로버스트 가중(Tukey/IRLS)으로 가야 한다.
-    return (fit_plane(depth, K, depth_scale, mask=m, dist_thresh=0.003)
-            or fit_plane(depth, K, depth_scale, mask=m))
+    for thr in (0.003, 0.006):
+        plane = fit_plane(depth, K, depth_scale, mask=m, dist_thresh=thr)
+        if plane is not None:
+            return plane, thr
+    return None, None
 
 
 class PerceptionPipeline:
@@ -306,6 +312,8 @@ class PerceptionPipeline:
         if not self._plane_fixed:
             self.belt_plane = None
             self._plane_tried = False
+        self._late_drops = 0
+        self._plane_thr = None
         self._frame_idx = 0
         self._prev_gray = None
         self._last_stamp = None
@@ -351,12 +359,33 @@ class PerceptionPipeline:
             # 시간축에서 재사용하면 stale pose가 다시 publishable 해진다.
             # reset() 은 detector/노브와 직접 주입한 belt plane은 보존한다.
             self.reset()
-        elif self.late_frame_drop_required(stamp_s):
+        elif self.late_frame_drop_required(stamp_s) \
+                and self._late_drops < LATE_DROP_STREAK_MAX:
             # 지연 프레임이 filter/track의 시간을 과거로 되돌리지 못하게 한다.
+            #
+            # **유한이어야 한다.** 이 경로는 _last_stamp 를 전진시키지 않으므로,
+            # 상계가 없으면 한 번 빠졌을 때 못 나온다 — time_reset_required 는
+            # stamp <= STAMP_RESET_NEW_RUN_MAX_S(1.0s) 를 요구하니, /clock 이
+            # reset 됐는데 파이프라인이 처음 보는 프레임이 이미 1초를 넘었으면
+            # reset 분기를 못 타고 드롭만 영원히 반복한다. 노드는 살아 있고
+            # 에러도 없다 — 이 저장소가 반복해서 당한 "조용히 다르게 동작"
+            # 이다(docs/README.md 3-1). LE_REJECT_STREAK 이 같은 이유로
+            # "유한이 아니라 상계" 였다.
+            #
+            # 상계에 닿으면 시계가 실제로 옮겨간 것으로 결론내고 reset 한다.
+            self._late_drops += 1
+            if self._late_drops == 1:
+                print(f"[stamp] 지연 프레임 드롭 시작 (stamp={stamp_s:.3f} < "
+                      f"last={self._last_stamp:.3f})", flush=True)
             return []
+        elif self.late_frame_drop_required(stamp_s):
+            print(f"[stamp] 지연 프레임 {self._late_drops}회 연속 — 시계가 실제로 "
+                  f"옮겨간 것으로 보고 reset 한다 (stamp={stamp_s:.3f})", flush=True)
+            self.reset()
         dt = (stamp_s - self._last_stamp) if self._last_stamp is not None \
             else NOMINAL_DT
         self._last_stamp = stamp_s
+        self._late_drops = 0
         self._last_dt = float(np.clip(dt, 1e-3, 0.5))  # "타당한 dt"의 단일 정의
         # 관측 유무와 무관하게 모든 트랙의 시간을 전진 — 거부·미관측
         # 프레임에도 P가 자라는 것이 교착 불가능성의 근거다
@@ -396,8 +425,8 @@ class PerceptionPipeline:
                 # 통과한 평면으로 pink block 발행이 336 -> 168 프레임,
                 # size_std 가 6.7 -> 104.9mm 로 파탄났다.
                 self._plane_tried = True
-                self.belt_plane = _fit_support_plane(strong, depth, K,
-                                                     self.depth_scale)
+                self.belt_plane, self._plane_thr = _fit_support_plane(
+                    strong, depth, K, self.depth_scale)
                 # 단발 추정 후 영구 캐시다. 조용히 틀린 평면은 두께·중심 z 로만
                 # 드러나 원인을 평면에서 찾지 않게 된다 — 한 줄이라도 남긴다.
                 # 시도한 경우에만 찍는다 — 검출이 늦게 잡히는 씬에서 "실패" 를
@@ -405,7 +434,8 @@ class PerceptionPipeline:
                 # flush 필수 — 없으면 launch 로 띄웠을 때 버퍼에 갇혀
                 # 운영 중 진단이 안 된다(2026-08-24 라이브에서 실제로 못 봤다).
                 # sam3_detector 의 프롬프트 경고가 같은 이유로 flush 를 쓴다.
-                print(f"[belt_plane] {self.belt_plane}" if self.belt_plane
+                print(f"[belt_plane] dist_thresh={self._plane_thr*1000:.0f}mm "
+                      f"{self.belt_plane}" if self.belt_plane
                       else "[belt_plane] 추정 실패 — 무구속 OBB 로 진행",
                       flush=True)
         for d in detections:  # 매칭 비용(depth 충돌 배제)이 쓸 depth를 1회만 계산

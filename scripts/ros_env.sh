@@ -21,7 +21,9 @@
 # 1MB 를 요구하면 트랜스포트 등록이 실패해 통신이 통째로 끊긴다.
 #
 # 이 값의 사본이 여기 말고 더 있다. 하나를 바꾸면 전부 바꿀 것:
-#   docs/bridge_contract.md §1.1 / docker-compose.yml / (Windows) cellomni 실행.bat
+#   docs/bridge_contract.md §1.1 / docker-compose.yml /
+#   src/roboworld_perception/launch/perception.launch.py (SetEnvironmentVariable) /
+#   (Windows) cellomni 실행.bat
 # Windows 쪽 사본은 이 저장소가 관리할 수 없다 — 한쪽만 켜면 안 붙는다.
 export FASTDDS_BUILTIN_TRANSPORTS='LARGE_DATA?max_msg_size=190KB&sockets_size=200KB&non_blocking=true&tcp_negotiation_timeout=50'
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp

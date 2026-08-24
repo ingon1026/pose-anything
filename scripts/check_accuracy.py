@@ -35,8 +35,9 @@ import numpy as np
 # 0 이 아니다: geometry.fit_plane 의 segment_plane(dist_thresh, 3, 200) 이
 # 시드 없는 RANSAC 이고, pipeline 이 그 평면을 실행당 한 번만 맞춰 영구
 # 캐시하므로(_plane_tried) 평면 오차가 실행 간에 흔들리면서 프레임간 σ 에는
-# 안 잡힌다. 두께 기준 실행 간 변동 폭이 약 0.55mm 로 측정됐다.
-# 지금은 아래 ABS_FLOOR_MM=2.0 이 그 변동을 덮어 판정이 안전하다.
+# 안 잡힌다. **실행 간 평면 변동은 씬마다 자릿수가 다르다** —
+# Isaac ±0.40mm / test4 ±2.98mm / test2 ±13mm 급(repeats=21 실측).
+# 아래 ABS_FLOOR_MM=2.0 은 **Isaac 만 덮는다** — test2·test4 에는 부족하다.
 # **ABS_FLOOR_MM 을 낮추려면 평면 변동을 먼저 재서 그 아래로 내려가지 않게 할 것**
 # (같은 조건을 여러 번 돌려 분포를 본다). 근거: docs/README.md §5 "std 는
 # 재현성이 아니다", docs/belt_plane_2026-08-21.md.
