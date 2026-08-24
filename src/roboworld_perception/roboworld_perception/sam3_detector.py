@@ -17,6 +17,20 @@ PROMPT_ALIASES = {
 }
 
 
+# 프롬프트 임베딩 캐시 상한. 키가 런타임 입력(/perception/prompt 토픽)이라
+# 상한이 없으면 원리적으로 무한히 자란다.
+#
+# **크기 자체는 작다** — 항목당 16.2 KB 다(계산: text_embeds [1, 32, 256] bf16
+# = 16 KB + attention_mask [1, 32] int64 = 256 B. 토크나이저가 프롬프트 길이와
+# 무관하게 32 로 고정 패딩하므로 상수다). 1,000 개를 쌓아도 16 MB, 12 GB 의
+# 0.13% 라 이 상한은 OOM 대책이 아니라 **무한 증가라는 성질 자체를 닫는 가드**다.
+#
+# 64 는 실기 최대 프롬프트 수(test5 의 4 개)의 16 배다. 정상 사용에서는 절대
+# 닿지 않으므로 축출 정책(FIFO/LRU)이 결과를 바꾸지 않는다 — 가장 단순한
+# 삽입 순서를 쓴다. **상한에 닿는 것 자체가 비정상 신호**다.
+TEXT_CACHE_MAX = 64
+
+
 def parse_prompts(s):
     """쉼표 구분 프롬프트 문자열 → 리스트 (노드·스크립트 공용 규칙)."""
     return [p.strip() for p in s.split(",") if p.strip()]
@@ -65,6 +79,10 @@ class Sam3Detector:
         text_mask 로 따로 쓰이므로 계속 넘겨야 한다.
         """
         if text not in self._text_cache:
+            if len(self._text_cache) >= TEXT_CACHE_MAX:
+                # 삽입 순서가 가장 오래된 항목. 위 TEXT_CACHE_MAX 주석 참고 —
+                # 여기 닿았다면 프롬프트가 런타임에 계속 바뀌고 있다는 뜻이다.
+                self._text_cache.pop(next(iter(self._text_cache)))
             inputs = self.processor(text=text, return_tensors="pt").to(self.device)
             self._text_cache[text] = {
                 "text_embeds": self.model.get_text_features(
