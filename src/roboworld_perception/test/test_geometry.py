@@ -161,3 +161,81 @@ def test_max_thickness_admits_every_measured_object():
 
 def test_max_thickness_rejects_measured_garbage():
     assert GARBAGE_THICKNESS_MM / 1000 > MAX_THICKNESS
+
+
+# ── stride 패리티 아티팩트 ────────────────────────────────
+def _slab(w_px, h_px=20, z=1.0):
+    """z m 앞의 fronto-parallel 슬랩. fx=300 이라 1 px = 3.33 mm(z=1m)."""
+    depth = np.zeros((480, 640), dtype=np.uint16)
+    mask = np.zeros((480, 640), dtype=bool)
+    depth[200:200 + h_px, 300:300 + w_px] = int(z * 1000)
+    mask[200:200 + h_px, 300:300 + w_px] = True
+    return mask, depth
+
+
+K_WIDE = np.array([[300.0, 0, 320], [0, 300.0, 240], [0, 0, 1]])
+
+
+def test_stride_does_not_lose_extreme_columns():
+    """폭 17~24 px 전 범위에서 stride 감축이 폭을 깎지 않는다.
+
+    구 구현(nonzero 평탄 나열을 [::stride])은 **짝수 폭에서 마지막 열이
+    통째로 탈락**해 정확히 1 px(= 3.33 mm) 짧게 나왔다 — 홀수 폭에서는 행마다
+    위상이 번갈아 양 끝이 다 살아 손실 0. 즉 폭 편향이 홀짝에 따라 켜졌다
+    꺼졌다 했다. 이 테스트는 그 구현에서 짝수 폭 전부 실패한다.
+    """
+    for w in range(17, 25):
+        mask, depth = _slab(w)
+        ref = mask_depth_to_points(mask, depth, K_WIDE, stride=1, erode_px=0)
+        exact = ref[:, 0].max() - ref[:, 0].min()
+        for stride in (2, 3):
+            pts = mask_depth_to_points(mask, depth, K_WIDE, stride=stride,
+                                       erode_px=0)
+            got = pts[:, 0].max() - pts[:, 0].min()
+            assert abs(got - exact) < 1e-9, f"폭 {w}px, stride {stride}"
+            got_v = pts[:, 1].max() - pts[:, 1].min()
+            assert abs(got_v - (ref[:, 1].max() - ref[:, 1].min())) < 1e-9
+
+
+def test_stride_one_is_unchanged():
+    """stride=1 은 극단 복원이 무연산 — 변경이 감축 경로에만 갇혀 있다."""
+    mask, depth = _slab(20)
+    pts = mask_depth_to_points(mask, depth, K_WIDE, stride=1, erode_px=0)
+    ys, xs = np.nonzero(mask)
+    assert len(pts) == len(ys)
+
+
+def test_stride_point_count_stays_near_reduction_target():
+    """감축 의도가 유지된다 — 극단 복원은 대략 행 수(H)만큼만 더한다."""
+    mask, depth = _slab(200, 100)
+    full = len(mask_depth_to_points(mask, depth, K_WIDE, stride=1, erode_px=0))
+    pts = len(mask_depth_to_points(mask, depth, K_WIDE, stride=2, erode_px=0))
+    assert pts < 0.52 * full  # 1/2 + H/(H*W/2) = 0.505
+
+
+def test_rotated_mask_footprint_is_stride_invariant():
+    """회전해도 풋프린트가 stride 에 안 흔들린다 — 이 수정의 동기다.
+
+    회전하면 마스크 폭이 프레임마다 바뀌어 구 구현의 1 px 손실이 켜졌다
+    꺼졌다 했다. 55x50 mm 블록을 0~90° 5° 씩 돌린 합성 실측(z=0.95m,
+    fx=600 → 1px=1.58mm)에서 구 구현은 stride=1 대비 오차가 각도에 따라
+    0 ~ 1.58 mm 로 진동했다(0°/90° 에서 최대). 새 구현은 전 각도 0 이다.
+    """
+    import cv2
+    z_top, belt = 0.95, 1.0
+    plane = (np.array([0.0, 0.0, -1.0]), belt)
+    for ang in range(0, 95, 5):
+        w = 0.055 / z_top * K[0, 0]
+        h = 0.050 / z_top * K[1, 1]
+        poly = cv2.boxPoints(((320.0, 240.0), (w, h), ang)).astype(np.int32)
+        m = np.zeros((480, 640), np.uint8)
+        cv2.fillPoly(m, [poly], 1)
+        mask = m.astype(bool)
+        depth = np.zeros((480, 640), np.uint16)
+        depth[mask] = int(z_top * 1000)
+
+        def footprint(stride):
+            pts = mask_depth_to_points(mask, depth, K, stride=stride,
+                                       erode_px=0)
+            return np.sort(obb_on_plane(pts, plane).extent[:2])[::-1]
+        assert np.allclose(footprint(2), footprint(1), atol=1e-9), f"{ang}도"

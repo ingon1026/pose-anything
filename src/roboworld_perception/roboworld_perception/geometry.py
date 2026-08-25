@@ -141,14 +141,57 @@ MAX_THICKNESS = 0.35   # m — 두께 상한. "이 벨트에 놓일 수 있는 �
                        # 중간축 대비 배율은 이미 성립하지 않는다.
 
 
+def _row_extreme_flat(mask):
+    """행별 최좌·최우 픽셀의 flat(row-major) 인덱스.
+
+    이것만으로 **픽셀 집합의 볼록껍질 정점이 전부 보존된다**: 어떤 픽셀이 제
+    행의 최좌도 최우도 아니면 같은 행에 좌·우 이웃이 있어 두 점을 잇는 선분
+    내부에 놓이므로 껍질 정점이 될 수 없다. 대우로 껍질 정점은 반드시 어떤
+    행의 좌·우 끝이다. 열 방향 극단도 그 행의 좌우 끝에 포함된다.
+    minAreaRect 는 껍질만 보므로 풋프린트는 이 집합만 살려도 stride 와
+    무관해진다. (열별 극단을 따로 더하는 것은 껍질 보존에 중복이다.)
+    """
+    # argmax 는 "첫 nonzero" 가 아니라 "첫 최대값" 이다 — 1 과 255 가 섞인
+    # uint8 마스크가 들어오면 끝 픽셀이 틀린다. bool 로 못박고 시작한다.
+    mask = np.asarray(mask, bool)
+    w = mask.shape[1]
+    rows = np.flatnonzero(mask.any(1))
+    first = mask[rows].argmax(1)
+    last = w - 1 - mask[rows, ::-1].argmax(1)
+    return np.concatenate([rows * w + first, rows * w + last])
+
+
 def _backproject(depth, K, depth_scale, stride, z_range, mask=None):
     if mask is None:
         h, w = depth.shape
         ys, xs = np.mgrid[0:h:stride, 0:w:stride]
         ys, xs = ys.ravel(), xs.ravel()
     else:
-        ys, xs = np.nonzero(mask)
-        ys, xs = ys[::stride], xs[::stride]
+        # nonzero 는 row-major 1 차원 나열이라 그걸 stride 로 솎으면 뱀 모양
+        # (serpentine) 샘플이 된다 — 행이 바뀔 때 위상이 이어지므로 **마스크
+        # 폭이 짝수면 모든 행의 시작 위상이 같아져 마지막 열이 통째로 탈락**
+        # 하고, 홀수면 행마다 위상이 번갈아 양 끝이 다 산다. 즉 폭 측정에
+        # 1 px 계통 편향이 폭의 홀짝에 따라 켜졌다 꺼졌다 한다(합성 실측,
+        # z=1.0m fx=300 → 1px=3.33mm, erode_px=0):
+        #     폭 19/21px(홀) stride2 손실 0.00mm
+        #     폭 20/22px(짝) stride2 손실 3.33mm (= 1px)
+        # Isaac 블록 폭 55mm 는 약 19px 라 평상시엔 안 걸리지만, 회전하면
+        # 마스크 폭이 프레임마다 바뀌어 0 과 2.93mm 를 오간다.
+        #
+        # 격자 샘플(mask[::stride, ::stride])은 홀짝 의존은 없애지만 감축이
+        # 1/stride² 라 점이 절반으로 줄어 fit_plane 의 len(pts)<500 게이트를
+        # 새로 밟는다. 그래서 기존 감축은 그대로 두고 **행별 극단만 되돌려
+        # 넣는다** — 빼는 것이 없으므로 점 개수는 늘기만 하고, 껍질 손실은
+        # 폭의 홀짝과 무관하게 0 이 된다(픽셀 껍질 기준. 역투영은 z 가 행마다
+        # 다르면 아핀이 아니라 3D 껍질까지 동일하다고는 말할 수 없다).
+        # 추가 후보는 행별 2 개(2H)지만 절반쯤은 이미 뽑힌 점이라 실제 증가는
+        # 대략 H 개, 즉 직사각 마스크에서 stride/W 다(합성 실측, stride=2:
+        # 19x19px +9.9%, 55x30px +3.6%, 200x100px +1.0%, 링 +1.7%).
+        # 계산량이 실제로 문제되는 큰 마스크일수록 증가가 사라진다.
+        # union1d 가 정렬·중복 제거를 겸한다.
+        idx = np.flatnonzero(mask)
+        idx = np.union1d(idx[::stride], _row_extreme_flat(mask))
+        ys, xs = np.unravel_index(idx, mask.shape)
     z = depth[ys, xs].astype(np.float64)
     if depth.dtype != np.float32 and depth.dtype != np.float64:
         z *= depth_scale
