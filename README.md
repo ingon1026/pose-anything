@@ -147,7 +147,18 @@ git clone https://github.com/ingon1026/pose-anything.git
 cd pose-anything
 export HF_TOKEN=hf_xxxx            # token of an account with facebook/sam3 access
 docker compose run --rm perception                                    # live camera
-docker compose run --rm perception ./run.sh bags/mybag --prompts "book"   # rosbag
+```
+
+**A RealSense D455 is all you need.** `run.sh` with no arguments starts the camera
+itself and runs the pipeline on it — that is the product path, and it needs no data
+from this repository.
+
+Rosbags are for **reproducing the measurements in `docs/` and running the regression
+gate**, not for normal use. They are not distributed with this repo (see
+[`docs/datasets.md`](docs/datasets.md)); if you have one of your own, point at it:
+
+```bash
+docker compose run --rm perception ./run.sh path/to/your/bag --prompts "book"
 ```
 
 The prebuilt image is pulled from
@@ -159,6 +170,16 @@ on first run — no local build needed. To build from source instead: `docker co
 > when the pull fails ([Compose build spec](https://docs.docker.com/reference/compose-file/build/#using-build-and-image)).
 > A plain `docker compose run` therefore runs the **Hub image, not your working tree** —
 > silently, with nothing in the output to say so. Use `docker compose run --build --rm perception`.
+> The published image can also simply be **older than this repository** — it is pushed by
+> hand, not by CI.
+
+> **If Isaac Sim is running, stop it or move to another ROS domain.** Its ROS 2 bridge
+> publishes `/camera/camera/color/camera_info` — the same topic this node subscribes to —
+> with a different resolution. The node sees the calibration flip back and forth, resets on
+> every change (mixing calibrations would project pixels into the wrong 3D rays), and
+> publishes nothing. Observed 2026-08-25: replaying a bag with Isaac open produced a
+> header-only CSV and a log full of `camera_info changed`; `ROS_DOMAIN_ID=77` on both the
+> node and the player fixed it in one run.
 
 Model weights are **not** baked into the image (Meta's gated license) — they are
 downloaded once on first run into a mounted cache volume and reused afterwards.

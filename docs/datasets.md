@@ -6,12 +6,28 @@ dev machine at `~/roboworld/bags/` with tar backups on the Windows desktop
 test purpose, all bags are reserved as seed data for the planned
 SAM3-auto-label → lightweight-YOLO distillation pipeline.
 
+> **⚠ bag 은 필수 자산이 아니다 — 없어도 시스템은 돈다.** 이 bag 들은
+> **배포되지 않으며**, 실사용 경로는 **라이브 RealSense 카메라**다. `run.sh` 를
+> 인자 없이 돌리면 라이브 모드이고(`run.sh:22-28` 이 카메라를 확인하고 `:78` 이
+> `rs_launch.py` 를 띄운다), **D455 가 있으면 bag 이 전혀 필요 없다.** 이 프로젝트는
+> 로봇 셀 비전 시스템이라 **제품 경로가 라이브 카메라**다.
+>
+> bag 이 **필요한 경우는 둘뿐**이다:
+> 1. **회귀 게이트** — 루트 `README.md` 의 *"Regression gate before shipping"*
+>    (CI 에 자동 정확도 게이트가 없어 손으로 돌린다)
+> 2. **문서에 적힌 측정의 재현**
+>
+> 앞서 *"인수받은 사람은 한 프레임도 못 돌린다"* 는 판단이 있었는데 **틀렸다** —
+> bag 경로만 보고 내린 결론이었다(2026-08-25 냉시동 검증에서 정정).
+
 | Bag | Recorded | Scene | Camera | Used for | Distillation value |
 |---|---|---|---|---|---|
 | `test2` | 2026-08-07 | static conveyor, 4+ objects (thermos, laptop, book, smartphone) | 1280×720 top-down | detection quality, ~~size accuracy (±1 cm)~~ (**2026-08-25 철회, `e3b60f4`** — *"그 bag 에 정답이 없다"*. 실물 줄자 실측이 들어와야 정오를 가른다: `docs/README.md` §4 "측정하면 답이 나오는 것"), prompt tuning (water bottle → thermos) | multi-object variety |
 | `test3` | 2026-08-07 | hand-pushed rollers, 3 moving objects (book, glove, pink block) | 1280×720 top-down | tracking persistence, pose stability, hybrid-tracking validation. NOT usable for constant-velocity work (speed varies 40–137 mm/s) | motion blur / moving scenes |
 | `test4` | 2026-08-11 | static conveyor, 3 objects (black bag, keyboard, book), hand+black folder occlusions | 640×480, closer mount | occlusion signal measurement (score collapse, depth intrusion up to 554 mm), occlusion-handling development, reappearance latency (median 200 ms) | occlusion-hard examples |
 | `test5` | 2026-08-11 | same as test4 + gray notebook (4 objects), 68 s | 640×480 | held-out validation set for occlusion handling (params tuned on test4 only) | occlusion-hard examples, longer sequence |
+| **`isaac_belt_moving`** | Isaac Sim (합성) | 벨트 위 블록. **2758프레임** | 640×360 | **성격이 다르다 — 정답이 있는 유일한 bag.** 씬 정답 `200×55×55mm`([isaac_sim_connection](isaac_sim_connection_2026-08-13.md), `docs/README.md` §5)이 있어 **치수·평면·두께 정확도를 절대 기준으로 잴 수 있다.** 루트 `README.md` 의 **회귀 게이트가 요구하는 바로 그 bag** 이다(`scripts/run_offline.py --bag bags/isaac_belt_moving`) | 합성이라 실기 재질·잡음이 없다 — **실기 회귀를 대신하지 못한다**(`docs/README.md` §3 공통 교훈) |
+| `isaac_belt` | Isaac Sim (합성) | 위와 같은 씬, 정지 | 640×360 | **⚠ 브리지 수정 전에 녹화됐다** — color 78장 중 **4장만** depth 와 짝이 붙는다. 쓰려면 `--sync-slop` 을 올려야 한다(`scripts/run_offline.py:66-70`) | 위와 같음 |
 
 ## Measured facts derived from these bags
 
