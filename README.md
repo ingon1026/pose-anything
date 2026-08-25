@@ -144,6 +144,12 @@ The prebuilt image is pulled from
 [Docker Hub (`ingon1026/pose-anything`)](https://hub.docker.com/r/ingon1026/pose-anything)
 on first run — no local build needed. To build from source instead: `docker compose build` (~21 GB).
 
+> **If you edited the source, you must pass `--build`.** The service declares both
+> `build:` and `image:` with no `pull_policy`, so Compose *pulls first* and only builds
+> when the pull fails ([Compose build spec](https://docs.docker.com/reference/compose-file/build/#using-build-and-image)).
+> A plain `docker compose run` therefore runs the **Hub image, not your working tree** —
+> silently, with nothing in the output to say so. Use `docker compose run --build --rm perception`.
+
 Model weights are **not** baked into the image (Meta's gated license) — they are
 downloaded once on first run into a mounted cache volume and reused afterwards.
 Put rosbags under `./bags/` (mounted into the container); add `--headless` on

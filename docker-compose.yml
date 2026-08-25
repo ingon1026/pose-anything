@@ -1,7 +1,12 @@
 services:
   perception:
     build: .
-    image: ingon1026/pose-anything:latest   # 로컬에 없으면 Docker Hub에서 pull
+    # ⚠ build 와 image 가 둘 다 있고 pull_policy 가 없으면, Compose 는 **먼저
+    # pull 을 시도하고** 레지스트리에서 못 찾을 때만 빌드한다(Compose 사양,
+    # build.md "Using build and image"). 즉 소스를 고쳐도 `docker compose up`
+    # 은 Hub 이미지를 받아 돌린다 — 조용히, 아무 표시 없이.
+    # 고친 소스를 돌리려면 `docker compose build` 또는 `up --build` 를 쓸 것.
+    image: ingon1026/pose-anything:latest
     network_mode: host        # 호스트 ROS 노드와 DDS 통신
     ipc: host
     privileged: true          # RealSense USB 접근 (bag만 쓰면 제거 가능)
