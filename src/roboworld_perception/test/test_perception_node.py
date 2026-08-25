@@ -541,6 +541,98 @@ def test_backpressure_drop_stays_silent(node):
     assert warns == []
 
 
+# --- 워치독: "한 장도 안 온다" 도 무성 실패다 --------------------------
+
+def test_watchdog_warns_when_no_frame_ever_arrives(node):
+    """냉시동에서 프레임이 아예 안 오면 콘솔이 침묵한다 — 그게 버그였다.
+
+    stale 분기는 `_last_frame_time is not None` 을 요구하는데 초기값이
+    None 이라 "처음부터 안 옴" 은 영원히 안 걸린다. 로그가 "SAM3 ready"
+    에서 끝나고, mcap 플러그인 부재로 bag 이 못 뜬 것과 정상 대기가
+    사람 눈에 똑같아 보인다.
+    """
+    warns = _catch_warns(node)
+    node.node._input_wait_since = time.monotonic() - 10.0
+    node.node._watchdog()
+    assert node.errors == []
+    assert len(warns) == 1
+    assert "camera_info=없음" in warns[0]   # info_topic·bag 쪽을 가리킨다
+
+
+def test_watchdog_keeps_warning_while_no_frame_arrives(node):
+    """`test_persistent_mismatch_keeps_warning` 과 같은 판정이다 —
+    "경고 1줄 뒤 침묵" 은 그 자체가 이 저장소가 금하는 형태다. 억제는
+    rclpy Throttle 이 하고, 노드는 호출을 멈추지 않는다.
+    """
+    node.node.on_info(_info())
+    warns = _catch_warns(node)
+    node.node._input_wait_since = time.monotonic() - 10.0
+    for _ in range(3):
+        node.node._watchdog()
+    assert node.errors == []
+    assert len(warns) == 3
+    assert all("camera_info=수신" in w for w in warns)  # 이번엔 토픽·동기화 쪽
+
+
+@pytest.mark.parametrize("setup", ["contract", "empty_prompt"])
+def test_watchdog_defers_to_the_warning_that_names_the_cause(node, setup):
+    """프레임이 *오는데* 버려지는 중이면 on_frames 가 이미 이유까지 말한다.
+
+    거기에 "bag 이 재생 중인지 확인하세요" 를 겹쳐 쏘면 재생은 멀쩡한데
+    사람이 틀린 곳을 보게 된다 — ③ 에서 CPU 폴백을 900초 상계의 원인으로
+    적으면 안 되는 것과 같은 종류의 오진이다.
+    """
+    node.node.on_info(_info())
+    if setup == "contract":
+        node.frame(10.0, width=32)          # 계약 위반 — on_frames 가 경고한다
+    else:
+        node.node.on_prompt(String(data=""))
+        node.frame(10.0)                    # 빈 프롬프트 — on_frames 가 경고한다
+    warns = _catch_warns(node)
+    node.node._input_wait_since = time.monotonic() - 10.0
+    node.node._watchdog()
+    assert node.errors == []
+    assert warns == []                      # 워치독은 한 줄도 겹치지 않는다
+
+
+def test_watchdog_still_warns_while_camera_info_is_missing(node):
+    """반대쪽 경계: camera_info 대기는 아무도 말하지 않는다.
+
+    on_frames 는 K 가 None 이면 조용히 return 한다(설계된 동작,
+    `test_waiting_for_camera_info_stays_silent`). 위 게이트를 넓게 잡아
+    이 경우까지 막으면 냉시동 침묵이 그대로 돌아온다.
+    """
+    warns = _catch_warns(node)
+    node.frame(10.0)                        # K is None — 조용히 버려진다
+    assert warns == []
+    node.node._input_wait_since = time.monotonic() - 10.0
+    node.node._watchdog()
+    assert node.errors == []
+    assert len(warns) == 1
+    assert "camera_info=없음" in warns[0]
+
+
+def test_watchdog_stays_silent_during_normal_startup(node):
+    """기동 직후 대기는 정상이다. 이 단언이 없으면 문턱을 0 으로 낮춰도
+    위 두 테스트가 통과해, 정상 기동이 초당 한 줄씩 시끄러워진다.
+    """
+    warns = _catch_warns(node)
+    node.node._watchdog()
+    assert node.errors == []
+    assert warns == []
+
+
+def test_watchdog_stops_warning_once_frames_arrive(node):
+    """첫 프레임이 대기를 끝낸다 — 정상 동작 중에 이 경고가 남으면 안 된다."""
+    node.node.on_info(_info())
+    node.frame(10.0)
+    assert node.node._input_wait_since is None
+    warns = _catch_warns(node)
+    node.node._watchdog()
+    assert node.errors == []
+    assert warns == []
+
+
 def test_status_reports_the_active_prompts(node):
     """콘솔 경고는 로컬이다. 원격 운영자가 보는 표면은 이 한 줄뿐이다."""
     node.node.on_info(_info())

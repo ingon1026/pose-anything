@@ -247,6 +247,12 @@ class PerceptionNode(Node):
         self._display = self.get_parameter("display").value
         self._fps_ema = 0.0
         self._last_frame_time = None
+        # 첫 프레임을 기다리기 시작한 시각. _last_frame_time 은 "한 장도 못
+        # 받음" 과 "받다가 끊김" 을 구분하지 못해(둘 다 None) _watchdog 의
+        # stale 분기가 전자를 영원히 놓친다. 여기를 SAM3 로드 *뒤* 인 이 지점
+        # 에서 재는 것이 핵심이다 — 프로세스 시작 기준이면 체크포인트 로딩
+        # 40초~15분 동안 정상 기동이 시끄러워진다.
+        self._input_wait_since = time.monotonic()
         self._last_process_ms = None
         self._last_status_time = None
         self._stale_cleared = True
@@ -378,6 +384,29 @@ class PerceptionNode(Node):
             self._stale_cleared = True
             self.get_logger().info(
                 "입력 없음 %.1f초 — 검출·마커 회수" % self._stale_timeout)
+        # 위 분기는 _last_frame_time 이 있어야 타므로 프레임이 처음부터 안 오면
+        # 로그가 "SAM3 ready" 에서 끝나고 침묵한다. /perception/status 가 같은
+        # 사실을 1 Hz 로 싣지만 이 저장소에 그 토픽 구독자가 없어 사람이 보는
+        # 표면은 콘솔뿐이다 — 계약 위반 경고와 같은 이유로 매 틱 부르고 억제는
+        # rclpy Throttle 에 맡긴다(상태도 파라미터도 안 늘어난다).
+        #
+        # 뒤의 두 항은 on_frames 가 이미 말하고 있는 경우를 비켜 간다. 프레임이
+        # *오는데* 계약 위반이나 빈 프롬프트로 버려지는 중이면 그쪽이 매 프레임
+        # 이유까지 붙여 경고한다 — 거기에 "bag 이 재생 중인지 확인하세요" 를
+        # 겹쳐 쏘면 재생은 멀쩡한데 틀린 곳을 보게 만든다. camera_info 를 아직
+        # 못 받은 경우(K is None)는 아무도 말하지 않으므로 여기가 유일한 표면이다.
+        if (self._input_wait_since is not None
+                and self._last_input_contract_error is None and self.prompts
+                and time.monotonic() - self._input_wait_since > self._stale_timeout):
+            # camera_info 유무를 함께 싣는다: 없으면 info_topic/bag 자체가,
+            # 있으면 color/depth 토픽이나 동기화가 원인이다.
+            self.get_logger().warn(
+                "RGB-D 프레임을 한 장도 받지 못했습니다 (%.0f초 경과, "
+                "camera_info=%s) — bag 이 재생 중인지, color/depth/info 토픽 "
+                "이름이 맞는지 확인하세요"
+                % (time.monotonic() - self._input_wait_since,
+                   "수신" if self.K is not None else "없음"),
+                throttle_duration_sec=1.0)
         self._publish_status()
 
     def _publish_status(self):
@@ -470,6 +499,7 @@ class PerceptionNode(Node):
         # 재시작 외에 회복이 없다 (docs/README.md 의 LATE_DROP_STREAK_MAX 행).
         self._busy = True
         self._last_frame_time = time.monotonic()
+        self._input_wait_since = None
         self._stale_cleared = False
         t0 = time.perf_counter()
         try:

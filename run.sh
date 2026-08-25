@@ -80,6 +80,22 @@ if [ "$SOURCE" = "live" ]; then
   fi
 fi
 
+# GPU 가 없으면 sam3_detector.py 가 경고 없이 CPU 로 떨어진다
+# (`"cuda" if torch.cuda.is_available() else "cpu"`). 모델 로드 자체는 CPU
+# 에서도 성공해 "SAM3 ready" 가 정상적으로 찍히므로 아래 900초 상계에는
+# 걸리지 않는다 — 증상은 추론에서만 나온다: 848M 파라미터를 fp32 CPU 로
+# 돌려 프레임당 수십 초, bag 은 끝까지 재생되고 CSV 는 거의 빈다.
+# 그래서 이 확인은 여기서, 기동 전에 한 번 해야 한다.
+# nvidia-smi 유무가 아니라 같은 식을 그대로 물어본다 — torch 가 CPU 전용
+# 빌드면 nvidia-smi 가 있어도 CUDA 는 못 쓴다. torch import 자체가 실패하면
+# 빈 문자열이 되어 여기서는 조용히 넘어간다(노드가 곧바로 죽고 아래
+# `kill -0` + `tail -20` 경로가 그 이유를 보여준다).
+GPU_OK=$(python3 -c "import torch; print(int(torch.cuda.is_available()))" 2>/dev/null)
+if [ "$GPU_OK" = "0" ]; then
+  echo "!! CUDA GPU 를 쓸 수 없습니다 — SAM3 가 CPU 로 돕니다 (프레임당 수십 초)."
+  echo "   기동은 정상으로 끝나지만 검출이 사실상 진행되지 않습니다."
+  echo "   결과 CSV 가 거의 비어 있으면 다른 원인을 찾기 전에 이 줄을 보세요."
+fi
 LOG=$(mktemp)
 CSV="output/ros_$(date +%Y%m%d_%H%M%S).csv"
 # 노드 stdout/stderr 는 전부 이 파일로 간다. pipeline.py 의 진단([stamp] 지연
@@ -97,9 +113,11 @@ PIDS+=($NODE_PID)
 # "SAM3 ready"는 perception_node가 찍는 로그 — 노드 쪽 문구 변경 시 함께 수정
 #
 # 상계가 필요한 이유: kill -0 은 *죽은* 프로세스만 잡는다. HF 체크포인트
-# (facebook/sam3, 3.44GB) 첫 다운로드가 멈추거나 HF_TOKEN 이 없어 프롬프트에서
-# 막히면 노드는 살아 있는 채로 진행이 없고, 이 루프는 영원히 돈다. 무한 대기를
-# 상계로 바꾸는 것은 pipeline.py 의 LATE_DROP_STREAK_MAX 와 같은 이유다.
+# (facebook/sam3, 3.44GB) 첫 다운로드가 느리거나 멈추면 노드는 살아 있는 채로
+# 진행이 없고, 이 루프는 영원히 돈다. (토큰은 이 분기에 오지 않는다 —
+# from_pretrained 는 gated repo 에서 대화형 프롬프트를 띄우지 않고 예외를
+# 던진다. HF_TOKEN 미설정·무권한은 즉시 사망해 위 `kill -0` 이 잡는다.)
+# 무한 대기를 상계로 바꾸는 것은 pipeline.py 의 LATE_DROP_STREAK_MAX 와 같은 이유다.
 # 900초 근거: 캐시가 있으면 ~40초. 캐시가 없으면 3.44GB 를 받아야 하는데
 # 900초는 실효 3.9MB/s(≈31Mbps) 이상이면 통과한다. 그보다 느린 회선이면
 # STARTUP_TIMEOUT 을 올리거나, 미리 캐시를 채워 두는 쪽이 낫다.
@@ -109,7 +127,7 @@ until grep -q "SAM3 ready" "$LOG"; do
   kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -20 "$LOG"; exit 1; }
   if [ "$SECONDS" -ge "$STARTUP_TIMEOUT" ]; then
     echo "노드가 ${STARTUP_TIMEOUT}초 안에 'SAM3 ready' 를 찍지 못했습니다 (프로세스는 살아 있음)."
-    echo "흔한 원인: 체크포인트 첫 다운로드가 느리거나 멈춤, HF_TOKEN 미설정/무권한."
+    echo "흔한 원인: 체크포인트 첫 다운로드가 느리거나 멈춤."
     echo "대처: 캐시를 미리 채우거나(hf download facebook/sam3), STARTUP_TIMEOUT=1800 ./run.sh ..."
     echo "로그 전문: $LOG"
     tail -20 "$LOG"
@@ -135,7 +153,22 @@ if [ "$SOURCE" = "live" ]; then
   echo ">> 실시간 실행 중 (종료: Ctrl+C)"
   wait $NODE_PID
 else
-  ros2 bag play "$SOURCE" > /dev/null 2>&1
+  # 여기를 /dev/null 로 버리면 mcap 플러그인 부재·bag 손상·storage id 불일치
+  # 어느 것이 터져도 화면에는 ">> 준비 완료" 다음 즉시 ">> bag 재생 끝" 과
+  # 헤더뿐인 CSV 만 남는다. $LOG 가 아니라 별도 파일인 이유: 노드는 재생 중
+  # 프레임마다 맨 print() 를 쏟으므로(노드 로그 파일 주석) 재생 도중 난 실패는 tail -20
+  # 밖으로 밀려난다.
+  BAG_LOG=$(mktemp)
+  echo ">> bag 재생 중 (로그: $BAG_LOG)..."
+  ros2 bag play "$SOURCE" > "$BAG_LOG" 2>&1
+  BAG_RC=$?   # `if ! ...` 로 감싸면 ! 가 코드를 삼킨다. cleanup() 이 쓰는 rc 와도 이름을 겹치지 않는다
+  if [ "$BAG_RC" -ne 0 ]; then
+    echo "!! bag 재생 실패 (ros2 bag play 종료코드 $BAG_RC) — CSV 는 비어 있습니다: $CSV"
+    echo "   흔한 원인: mcap 스토리지 플러그인 부재(sudo apt install ros-jazzy-rosbag2-storage-mcap),"
+    echo "   bag 손상, metadata.yaml 의 storage id 불일치."
+    tail -20 "$BAG_LOG"
+    exit 1
+  fi
   echo ">> bag 재생 끝. 결과 CSV: $CSV (종료: Enter)"
   read -r
 fi

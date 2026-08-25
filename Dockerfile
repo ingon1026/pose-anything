@@ -1,3 +1,8 @@
+# ⚠ 이 태그는 고정이 아니다 — 오늘 빌드하면 오늘의 ros-base 를 받는다.
+# 아래 pip 핀은 그 위에 얹히는 층만 묶으므로, "측정 조건 고정" 은 OS·ROS
+# 층에는 미치지 않는다. 다이제스트로 묶으려면
+#   FROM ros:jazzy-ros-base@sha256:<...>
+# 인데 그러면 보안 갱신이 안 오므로 손으로 올려야 한다 - 아직 안 골랐다.
 FROM ros:jazzy-ros-base
 
 # ──────────────────────────────────────────
@@ -31,8 +36,19 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install --break-system-packages \
     torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
 
+# scipy 는 geometry.py:7 이 Rotation/Slerp 로 자세를 직접 계산하는 데 쓰고,
+# numpy/opencv 는 마스크·OBB 경로 전체가 탄다. 측정 조건을 고정한다면서
+# 이들을 띄워 두면 고정이 절반만 성립한다 — 호스트(측정이 돌던 곳) 값으로
+# 맞춘다. 위 네 개와 같은 이유다.
 RUN pip3 install --break-system-packages --ignore-installed \
-    transformers==5.5.0 open3d==0.19.0 rosbags scipy opencv-python pillow
+    transformers==5.5.0 open3d==0.19.0 \
+    numpy==2.5.0 scipy==1.17.1 opencv-python==4.13.0 pillow==12.1.1 \
+    rosbags==0.11.3 \
+    pytest
+# pytest 는 핀하지 않는다 — 측정에 안 들어가고, 이미지 안에서
+# `pytest src/roboworld_perception/test -q` 로 설치를 자기검증하기 위한 것이다.
+# 이게 없으면 Docker 로 시작한 사람은 데이터 없이 설치가 정상인지 확인할
+# 수단이 아예 없다.
 
 # ──────────────────────────────────────────
 # 3. 소스 복사 + colcon 빌드
