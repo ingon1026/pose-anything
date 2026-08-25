@@ -281,7 +281,7 @@ status[0].hardware_id = "rgbd_camera"
 | 마지막 프레임이 `stale_timeout` 초과 | **WARN**(1) | `RGB-D input stale` |
 | 그 외 | **OK**(0) | `RGB-D input healthy` |
 
-**KeyValue 키 (9개, 항상 이 순서로 전부 실린다)**:
+**KeyValue 키 (10개, 항상 이 순서로 전부 실린다)**:
 
 | 키 | 값 |
 |---|---|
@@ -292,6 +292,7 @@ status[0].hardware_id = "rgbd_camera"
 | `out_of_order_frame_drops` | 정수 누적 카운터 |
 | `stale_timeout_s` | 초, 소수 1자리 |
 | `camera_frame` | `camera_info` 가 보고한 광학 프레임 이름 |
+| `prompts` | 현재 프롬프트를 `,` 로 이은 것(`",".join(prompts)`). **비어 있으면 빈 문자열** |
 | `camera_image_size` | `"{w}x{h}"`. 아직 모르면 **`unknown`** |
 | `input_error` | 계약 위반 문자열. 정상이면 **빈 문자열** |
 
@@ -302,6 +303,19 @@ status[0].hardware_id = "rgbd_camera"
 > **⚠ 이건 파이프라인 건강이 아니라 *입력* 건강이다.** `OK` 는 RGB-D 프레임이
 > 최근에 들어왔다는 뜻이지 검출이 나가고 있다는 뜻이 아니다. 발행 여부는
 > `/perception/detections` 로 볼 것.
+
+> **⚠ `level` 만 보면 안 되는 구체적인 경우 — 빈 프롬프트.**
+> 프롬프트가 비면 `on_frames` 가 **모든 프레임을 조용히 버린다**
+> (`if self.K is None or self._busy or not self.prompts: return`). 그런데
+> `classify_input_health()` 는 **프롬프트를 인자로 받지도 않아서** `level` 은
+> 카메라 상태만 반영한다. 즉 **`level` 이 `OK` / `WARN` 이어도 검출이 안 나갈 수
+> 있고, 프롬프트가 비었는지는 `prompts` 값으로만 알 수 있다.** 그래서 이 키가
+> 있는 것이다 — **소비자는 `level` 과 `prompts` 를 같이 볼 것.**
+>
+> 게다가 **문구가 카메라를 지목한다.** `on_prompt` 가 `_reset_input_state` 를
+> 타므로 `_last_frame_time` 이 비워지고, **프레임이 흐르던 중 프롬프트가 비면**
+> status 가 `RGB-D input stale` 이 아니라 **`waiting for RGB-D frames`** 로
+> 나간다. 둘 다 카메라 탓처럼 읽히므로 **진짜 원인 지목은 `prompts` 값이 한다.**
 
 ### 6.2 `Detection3DArray` 의 **회전 covariance 는 sentinel 이다**
 

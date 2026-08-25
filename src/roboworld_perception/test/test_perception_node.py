@@ -22,6 +22,7 @@ rclpy = pytest.importorskip("rclpy")
 
 from diagnostic_msgs.msg import DiagnosticStatus  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image  # noqa: E402
+from std_msgs.msg import String  # noqa: E402
 from visualization_msgs.msg import Marker  # noqa: E402
 
 from roboworld_perception import perception_node as pn  # noqa: E402
@@ -391,3 +392,162 @@ def test_watchdog_publishes_the_heartbeat(node):
     node.node._last_status_time = None
     node.node._watchdog()
     assert len(node.status) == 1
+
+
+# --- 워치독: 마커만이 아니라 detections 도 회수한다 ----------------------
+
+def test_watchdog_withdraws_detections_not_only_markers(node):
+    """입력이 끊기면 로봇이 읽는 토픽도 비운다.
+
+    마커만 지우면 RViz 는 깨끗해지는데 /perception/detections 에는
+    stale_timeout 초 전의 pose 가 그대로 남는다 — 사람이 보는 쪽만
+    정리되고 그리퍼는 옛 pose 로 계속 움직인다. tracker.T_STALE 의
+    fresh/publishable 판정은 노드가 프레임을 처리하는 동안에만 돌아서
+    입력이 끊기면 아무 도움이 안 된다.
+    """
+    node.node.on_info(_info())
+    node.frame(10.0)
+    assert node.errors == []
+    assert len(node.det) == 1  # 정상 발행 1장
+
+    node.node._last_frame_time = time.monotonic() - 10.0
+    node.node._watchdog()
+    assert node.deleteall_count() == 1
+    assert len(node.det) == 2                  # 회수가 실제로 나갔다
+    assert node.det[-1].detections == []
+    assert node.det[-1].header.frame_id == FRAME
+    # 스텁 검출기가 항상 [] 를 주므로 detections 만으로는 "마지막 배열을
+    # 다시 쏘기" 와 구분되지 않는다. 스탬프가 진짜 판별자다 — 소비자의
+    # staleness 필터가 회수를 최신으로 봐야 한다.
+    assert node.det[-1].header.stamp.sec != node.det[0].header.stamp.sec
+    assert node.node._prev_marker_ids == set()
+
+
+def test_watchdog_does_not_withdraw_while_input_is_healthy(node):
+    """반대쪽 사고: 회수를 if 밖으로 빼면 매 초 살아있는 검출을 지운다."""
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node._watchdog()
+    assert node.errors == []
+    assert len(node.det) == 1        # 정상 발행 1장 그대로
+    assert node.deleteall_count() == 0
+
+
+def test_watchdog_withdraws_once_not_every_tick(node):
+    """_stale_cleared 가 반복 발행을 막는다 — 1 Hz 로 빈 배열을 쏘지 않는다."""
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node._last_frame_time = time.monotonic() - 10.0
+    node.node._watchdog()
+    node.node._watchdog()
+    assert node.errors == []
+    assert len(node.det) == 2
+    assert node.deleteall_count() == 1
+
+
+def test_watchdog_does_not_discard_the_pipeline_state(node):
+    """회수만 한다. pipeline.reset() 을 타면 벨트 평면과 전 트랙이 날아가
+    입력이 돌아왔을 때 재적합해야 한다 — 워치독이 살 이유가 없는 비용이다.
+    """
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node._last_frame_time = time.monotonic() - 10.0
+    node.node._watchdog()
+    assert node.errors == []
+    assert node.pipeline._last_stamp == 10.0
+    assert node.node._last_frame_time is not None
+
+
+# --- 프롬프트 교체도 회수 경로를 탄다 -----------------------------------
+
+def test_prompt_change_withdraws_detections(node):
+    """소비자가 붙잡은 pose 는 이제 **다른 물체 종류**의 것이다."""
+    node.node.on_info(_info())
+    node.frame(10.0)
+    assert node.errors == []
+    assert len(node.det) == 1
+
+    node.node.on_prompt(String(data="thermos"))
+    assert node.node.prompts == ["thermos"]     # 교체 자체는 그대로 일어났다
+    assert len(node.det) == 2
+    assert node.det[-1].detections == []
+    assert node.det[-1].header.stamp.sec != node.det[0].header.stamp.sec
+    assert node.deleteall_count() == 1
+    assert node.pipeline._last_stamp is None    # pipeline.reset() 도 탔다
+
+
+def test_prompt_change_resets_frame_age_and_recovers_next_frame(node):
+    """_reset_input_state 의 부작용을 못 박는다 — 다음 프레임에 복구된다."""
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node.on_prompt(String(data="thermos"))
+    assert node.node._last_frame_time is None
+    assert _values(node.latest_status())["last_frame_age_s"] == "never"
+
+    node.frame(11.0)
+    assert node.errors == []
+    assert node.process_calls == 2
+    assert float(_values(node.latest_status())["last_frame_age_s"]) < 1.0
+
+
+# --- 빈 프롬프트: 무성 실패 금지 ----------------------------------------
+
+def _catch_warns(node):
+    warns = []
+    # throttle_duration_sec 이 kwarg 로 오므로 **kw 가 필요하다. 여기서
+    # 가로채면 throttle 을 안 타고 호출 수가 그대로 보인다.
+    node.node.get_logger().warn = lambda msg, **kw: warns.append(msg)
+    return warns
+
+
+@pytest.mark.parametrize("text", ["", "  ", ",", " , "])
+def test_empty_prompt_drops_frames_loudly(node, text):
+    """parse_prompts 가 [] 를 주는 모든 입력에서 로그 0 이면 안 된다.
+
+    이 경로는 publish() 를 한 번도 안 타므로 옛 프롬프트의 마지막
+    Detection3DArray 가 **무기한** 남는다. 게다가 _last_frame_time 이
+    안 갱신돼 5초 뒤 status 가 멀쩡한 카메라를 stale 이라고 가리킨다.
+    """
+    node.node.on_info(_info())
+    warns = _catch_warns(node)
+    node.node.on_prompt(String(data=text))
+    assert node.node.prompts == []
+
+    for _ in range(3):
+        node.frame(10.0)
+    assert node.errors == []
+    assert node.process_calls == 0
+    assert len(warns) == 3          # 매 프레임 — 한 줄 뒤 침묵이 아니다
+    assert all("prompt" in w for w in warns)
+
+
+def test_waiting_for_camera_info_stays_silent(node):
+    """기동 대기는 정상이다 — 여기까지 시끄러워지면 경고가 무의미해진다."""
+    warns = _catch_warns(node)
+    node.frame(10.0)
+    assert node.errors == []
+    assert node.process_calls == 0
+    assert warns == []
+
+
+def test_backpressure_drop_stays_silent(node):
+    """추론 중 프레임 버리기는 설계된 동작이다 — 초당 여러 줄이 나오면 안 된다."""
+    node.node.on_info(_info())
+    warns = _catch_warns(node)
+    node.node._busy = True
+    node.frame(10.0)
+    assert node.errors == []
+    assert node.process_calls == 0
+    assert warns == []
+
+
+def test_status_reports_the_active_prompts(node):
+    """콘솔 경고는 로컬이다. 원격 운영자가 보는 표면은 이 한 줄뿐이다."""
+    node.node.on_info(_info())
+    assert _values(node.latest_status())["prompts"] == "물통"
+
+    node.node.on_prompt(String(data="thermos, cup"))
+    assert _values(node.latest_status())["prompts"] == "thermos,cup"
+
+    node.node.on_prompt(String(data=" , "))
+    assert _values(node.latest_status())["prompts"] == ""

@@ -333,16 +333,15 @@ class PerceptionNode(Node):
                 f"camera_info received, {signature[0]}x{signature[1]}, "
                 f"frame={self.frame_id}")
 
-    def _reset_input_state(self, reason):
-        """Forget observations and explicitly withdraw output after a reset."""
-        self.pipeline.reset()
-        self._last_frame_time = None
-        self._stale_cleared = True
-        self._prev_marker_ids = set()
+    def _withdraw_output(self):
+        """Retract both output topics so no consumer keeps the last detection.
 
-        # A reset must be visible to consumers immediately; otherwise a robot
-        # can keep acting on the last detection while this node waits for a
-        # compatible frame.  The next valid frame repopulates both topics.
+        A withdrawal must be visible to consumers immediately; otherwise a
+        robot can keep acting on the last detection while this node has
+        nothing valid to say.  Clearing the markers alone only tidies up what
+        a person watches in RViz - /perception/detections is what a robot
+        reads, so the two always go out together.
+        """
         empty = Detection3DArray()
         empty.header.stamp = self.get_clock().now().to_msg()
         empty.header.frame_id = self.frame_id
@@ -350,24 +349,35 @@ class PerceptionNode(Node):
         markers = MarkerArray()
         markers.markers.append(Marker(action=Marker.DELETEALL))
         self.pub_markers.publish(markers)
+        self._prev_marker_ids = set()
+
+    def _reset_input_state(self, reason):
+        """Forget observations and explicitly withdraw output after a reset."""
+        self.pipeline.reset()
+        self._last_frame_time = None
+        self._stale_cleared = True
+        # The next valid frame repopulates both topics.
+        self._withdraw_output()
         self.get_logger().info(f"input contract reset: {reason}")
 
     def on_prompt(self, msg: String):
+        # A prompt switch invalidates every previous observation, exactly like
+        # a /clock reset - and worse for a consumer, because the pose it still
+        # holds belongs to a different kind of object.
         self.prompts = parse_prompts(msg.data)
-        self.pipeline.reset()
+        self._reset_input_state("prompt changed")
         self.get_logger().info(f"prompts -> {self.prompts}")
 
     def _watchdog(self):
         """Clear stale markers and publish the one-Hz input health heartbeat."""
         if (not self._stale_cleared and self._last_frame_time is not None and
                 time.monotonic() - self._last_frame_time > self._stale_timeout):
-            markers = MarkerArray()
-            markers.markers.append(Marker(action=Marker.DELETEALL))
-            self.pub_markers.publish(markers)
+            # Withdraw only - the belt plane and the tracks stay, because the
+            # input may come back and pipeline.reset() would refit them.
+            self._withdraw_output()
             self._stale_cleared = True
-            self._prev_marker_ids = set()
             self.get_logger().info(
-                "입력 없음 %.1f초 — 마커 정리" % self._stale_timeout)
+                "입력 없음 %.1f초 — 검출·마커 회수" % self._stale_timeout)
         self._publish_status()
 
     def _publish_status(self):
@@ -399,6 +409,9 @@ class PerceptionNode(Node):
                      value=str(self.pipeline.late_frame_drops)),
             KeyValue(key="stale_timeout_s", value=f"{self._stale_timeout:.1f}"),
             KeyValue(key="camera_frame", value=self.frame_id),
+            # An empty value is why every frame is being dropped - the console
+            # warning is local, this is what a remote operator can see.
+            KeyValue(key="prompts", value=",".join(self.prompts)),
             KeyValue(key="camera_image_size",
                      value=("unknown" if signature is None else
                             f"{signature[0]}x{signature[1]}")),
@@ -410,8 +423,18 @@ class PerceptionNode(Node):
         self.pub_status.publish(heartbeat)
 
     def on_frames(self, color_msg: Image, depth_msg: Image):
-        if self.K is None or self._busy or not self.prompts:
+        if self.K is None or self._busy:
             return  # ponytail: drop frames while inference is running
+        if not self.prompts:
+            # parse_prompts("") / (" ") / (",") all yield [].  Without this the
+            # node drops every frame with no log and no error, _last_frame_time
+            # never advances, and five seconds later /perception/status blames
+            # the camera for input that is in fact fine.  Same throttled-warn
+            # idiom as the contract mismatch below, for the same reason.
+            self.get_logger().warn(
+                "prompt list is empty; every RGB-D frame is dropped - publish "
+                "a name to /perception/prompt", throttle_duration_sec=1.0)
+            return
         contract_error = frame_contract_error(
             color_msg, depth_msg, self._camera_info_signature)
         if contract_error:
