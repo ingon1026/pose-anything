@@ -69,6 +69,11 @@ if [ "$SOURCE" = "live" ]; then
   if ros2 topic list 2>/dev/null | grep -q "^/camera/camera/color/image_raw$"; then
     echo ">> 이미 실행 중인 카메라 노드를 사용합니다 (중복 실행 방지)"
   else
+    # 아래 launch 는 출력을 버리므로 패키지가 없으면 조용히 안 뜬다 — 미리 확인한다
+    if ! ros2 pkg prefix realsense2_camera > /dev/null 2>&1; then
+      echo "!! realsense2_camera 패키지가 없습니다 — 카메라 노드가 뜨지 않습니다."
+      echo "   sudo apt install ros-jazzy-realsense2-camera"
+    fi
     echo ">> RealSense 카메라 시작..."
     setsid ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
     PIDS+=($!)
@@ -77,7 +82,11 @@ fi
 
 LOG=$(mktemp)
 CSV="output/ros_$(date +%Y%m%d_%H%M%S).csv"
-echo ">> 노드 시작 (SAM3 로딩 ~40초)..."
+# 노드 stdout/stderr 는 전부 이 파일로 간다. pipeline.py 의 진단([stamp] 지연
+# 프레임 드롭, [belt_plane] dist_thresh/추정실패)은 get_logger() 가 아니라 맨
+# print() 라 /rosout 에도 ~/.ros/log 에도 안 남는다 — 여기가 유일한 사본이다.
+echo ">> 노드 로그: $LOG"
+echo ">> 노드 시작 (SAM3 로딩 ~40초, 체크포인트 첫 다운로드면 훨씬 길다)..."
 DISPLAY_PARAM=true
 [ "$HEADLESS" = "1" ] && DISPLAY_PARAM=false
 setsid ros2 run roboworld_perception perception_node --ros-args \
@@ -86,8 +95,26 @@ setsid ros2 run roboworld_perception perception_node --ros-args \
 NODE_PID=$!
 PIDS+=($NODE_PID)
 # "SAM3 ready"는 perception_node가 찍는 로그 — 노드 쪽 문구 변경 시 함께 수정
+#
+# 상계가 필요한 이유: kill -0 은 *죽은* 프로세스만 잡는다. HF 체크포인트
+# (facebook/sam3, 3.44GB) 첫 다운로드가 멈추거나 HF_TOKEN 이 없어 프롬프트에서
+# 막히면 노드는 살아 있는 채로 진행이 없고, 이 루프는 영원히 돈다. 무한 대기를
+# 상계로 바꾸는 것은 pipeline.py 의 LATE_DROP_STREAK_MAX 와 같은 이유다.
+# 900초 근거: 캐시가 있으면 ~40초. 캐시가 없으면 3.44GB 를 받아야 하는데
+# 900초는 실효 3.9MB/s(≈31Mbps) 이상이면 통과한다. 그보다 느린 회선이면
+# STARTUP_TIMEOUT 을 올리거나, 미리 캐시를 채워 두는 쪽이 낫다.
+STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-900}
+SECONDS=0
 until grep -q "SAM3 ready" "$LOG"; do
-  kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -5 "$LOG"; exit 1; }
+  kill -0 $NODE_PID 2>/dev/null || { echo "노드 실행 실패:"; tail -20 "$LOG"; exit 1; }
+  if [ "$SECONDS" -ge "$STARTUP_TIMEOUT" ]; then
+    echo "노드가 ${STARTUP_TIMEOUT}초 안에 'SAM3 ready' 를 찍지 못했습니다 (프로세스는 살아 있음)."
+    echo "흔한 원인: 체크포인트 첫 다운로드가 느리거나 멈춤, HF_TOKEN 미설정/무권한."
+    echo "대처: 캐시를 미리 채우거나(hf download facebook/sam3), STARTUP_TIMEOUT=1800 ./run.sh ..."
+    echo "로그 전문: $LOG"
+    tail -20 "$LOG"
+    exit 1
+  fi
   sleep 2
 done
 if [ "$HEADLESS" = "1" ]; then
@@ -95,6 +122,10 @@ if [ "$HEADLESS" = "1" ]; then
 else
   # world TF는 perception_node가 camera_info의 실제 frame 이름으로 직접
   # 발행한다 (frame 이름이 bag·카메라 설정마다 달라 여기서 하드코딩 불가)
+  if ! command -v rviz2 > /dev/null 2>&1; then
+    echo "!! rviz2 가 없습니다 — 3D 마커 창은 뜨지 않습니다 (ros-base 설치에는 없다)."
+    echo "   sudo apt install ros-jazzy-rviz2   ·  또는 --headless 로 실행"
+  fi
   setsid rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
   PIDS+=($!)
   echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"

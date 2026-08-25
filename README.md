@@ -85,12 +85,32 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 | Metric | Result |
 |---|---|
 | Track ID persistence (3 moving objects, 20 s) | single ID each, 0 axis flips |
-| OBB size — Isaac scene (USD ground truth 200x55x55 mm) | footprint −4 to −8 mm, thickness +3.2 mm |
+| OBB size — Isaac scene (USD model 200x55x55 mm) | footprint −4 to −8 mm; thickness **+1.97 mm** vs. the 54.5 mm visible height above the belt (the block sits 0.5 mm into it), measured on the `dist_thresh` **3 mm** branch — 500 frames, `image_size` 1008 (`47ad9cb`). The same branch at 6 mm measured **+3.2 mm** on this scene; test2/test4 fall back to 6 mm, but have no ground truth of their own, so their bias is unquantified |
 | OBB size vs. real objects (test2/test3) | **not validated** — no measured ground truth for those bags yet |
 | Center jitter (static objects) | ≤ 1.5 mm std *(within a run; the support plane is fitted once and cached, so plane error does not appear in this figure — run-to-run plane spread is 0.40 mm on the Isaac scene and 13 mm on test2)* |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
 | Occlusion robustness (hand/object passing over, 29 events) | IDs survive all occlusions; stale poses suppressed; pose resumes ≈ 0.3 s (median) after reappearance |
 | Pipeline throughput (RTX 4070 Ti, `image_size` 1008, `detect_interval` 5) | 7.7 / 8.5 / 10.1 / 12.4 FPS on test2 / test5 / test4 / isaac — measured from CSV `proc_ms`, i.e. bag decode and mp4 encoding excluded (`docs/detect_interval_2026-08-21.md`) |
+
+### Regression gate before shipping
+
+There is no automated accuracy gate in CI — the bags and the reference CSVs are
+not in this repository (`bags/`, `output/` are gitignored), so this has to be run
+by hand on a machine that has them:
+
+1. **Reference** — replay a bag on a known-good build and keep the CSV:
+   `python3 scripts/run_offline.py --bag bags/isaac_belt_moving --prompts "blue bar with holes" --out output/ref_<date>`
+2. **Candidate** — replay the *same* bag on the build you intend to ship, into a
+   different `--out` directory.
+3. **Judge** — `python3 scripts/check_accuracy.py --ref output/ref_<date> --cand output/<candidate>`
+   must print **PASS**. Anything else is a regression, not a rounding difference —
+   the thresholds are derived from this pipeline's own frame-to-frame jitter
+   (see the constants block at the top of that script). Use the Isaac bag: the
+   script's absolute floor is derived for that scene, and the larger run-to-run
+   plane spread of test2/test4 produces spurious FAILs at it.
+
+Regenerate the reference after any change to `geometry.py` / plane fitting or to
+a pinned dependency version — an old reference silently blesses the old behaviour.
 
 ## Requirements
 
@@ -99,7 +119,8 @@ and a Hugging Face account — everything below ships inside the image. For nati
 
 - Ubuntu 24.04 (verified on WSL2) with **ROS 2 Jazzy**
 - NVIDIA GPU with ≥ 6 GB VRAM, PyTorch CUDA build (bf16 inference)
-- Python 3.12 — `transformers>=5.5`, `open3d`, `rosbags`, `scipy`, `opencv-python`
+- Python 3.12 — `torch==2.10.0`, `transformers==5.5.0`, `open3d==0.19.0`, `rosbags`, `scipy`, `opencv-python` (the first three are pinned because the
+  measured numbers above are tied to them — see *Native install* below)
 - Intel RealSense D455 + [`realsense2_camera`](https://github.com/IntelRealSense/realsense-ros) for live input
 - A Hugging Face account with access to the gated
   [`facebook/sam3`](https://huggingface.co/facebook/sam3) checkpoint
@@ -133,13 +154,36 @@ machines without a display.
 ```bash
 git clone https://github.com/ingon1026/pose-anything.git
 cd pose-anything
+
+# ROS 2 side. A ros-base install has none of these; ros-desktop still lacks
+# vision_msgs and the mcap storage plugin. Without vision-msgs the node dies
+# at import; without rosbag2-storage-mcap no bag in this project will replay
+# (they are all recorded as mcap).
+sudo apt install -y \
+    ros-jazzy-vision-msgs \
+    ros-jazzy-diagnostic-msgs \
+    ros-jazzy-rosbag2-storage-mcap \
+    ros-jazzy-rviz2 \
+    ros-jazzy-realsense2-camera 'ros-jazzy-librealsense2*' \
+    python3-colcon-common-extensions \
+    fonts-noto-cjk \
+    libgl1 libgomp1 usbutils
+
 pip install --user --break-system-packages \
-    torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
 pip install --user --break-system-packages \
-    "transformers>=5.5" open3d rosbags scipy opencv-python pillow
+    transformers==5.5.0 open3d==0.19.0 rosbags scipy opencv-python pillow
 hf auth login                      # account with facebook/sam3 access
 colcon build --symlink-install
 ```
+
+The three pinned packages (`torch`, `transformers`, `open3d`) are the ones the
+measured numbers above depend on — the same versions the Dockerfile installs.
+`torchvision` is pinned only because it has to match `torch`. Moving any of
+them invalidates the measurement conditions; re-run the regression gate below
+before trusting the table again. `realsense2_camera` / `librealsense2` are
+needed only for live camera input; `fonts-noto-cjk` only for Korean labels in
+the debug overlay.
 
 ```bash
 ./run.sh                           # live RealSense camera
@@ -246,9 +290,13 @@ src/roboworld_perception/         ROS 2 package (ament_python)
     fusion.py                     per-track Kalman filter + χ² observation gating
     geometry.py                   back-projection, OBB, axis matching
     overlay.py                    debug rendering
+    input_health.py               input contract checks, 1 Hz diagnostics
+    pose_covariance.py            position covariance for PoseWithCovariance
     perception_node.py            ROS 2 node
   rviz/perception.rviz            RViz preset
-  test/                           pytest, 40 cases incl. filter property tests
+  test/                           pytest, 14 files incl. filter property tests
+                                  (`pytest src/roboworld_perception/test -q`;
+                                   `scripts/check_ci_env.sh` reproduces CI)
 scripts/run_offline.py            bag → mp4/CSV without ROS
 run.sh                            single entry point
 ```

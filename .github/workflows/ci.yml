@@ -19,9 +19,23 @@ jobs:
         # torch/SAM3 불필요 — geometry·tracker·pipeline 단위 테스트만 실행
         run: pip install numpy scipy opencv-python-headless open3d pillow pytest
       - name: Run unit tests
-        # ⚠ rclpy 가 없으므로 test_perception_node.py 23개는 skip 된다
-        # (importorskip). 그러면 "118 passed, 23 skipped" 로 **초록불**이라,
-        # 노드 회귀는 CI 가 못 잡는다 - 영구 락아웃(LATE_DROP_STREAK_MAX
-        # 우회)이 정확히 그 부류다. 노드를 고쳤으면 rclpy 가 있는 곳에서
-        # 141 을 직접 확인할 것. -rs 로 skip 사유를 로그에 남긴다.
+        # ⚠ 여기서 안 도는 테스트가 있고, 로그의 skip 수로는 그 크기를 못 읽는다.
+        #
+        # importorskip 이 **모듈 최상단**이라 pytest 는 파일 하나를 skip 1건으로
+        # 센다. 그래서 요약은 두 자리 skip 이 아니라 "2 skipped" 로 나온다:
+        #   test_perception_node.py  - rclpy 없음
+        #   test_sam3_detector.py    - torch 없음 (이 job 은 일부러 안 깐다)
+        # 두 파일 안의 테스트 전부가 안 돌지만 요약에는 2 로만 보인다.
+        #
+        # 크기 감각(2026-08-25, 이 job 의 로그가 아니라 로컬 재현
+        # scripts/check_ci_env.sh 값이다): 115 passed, 2 skipped 인데 같은 시각
+        # 로컬 전체는 154 였다 - 39개가 CI 를 안 지난다. 같은 날 노드 테스트가
+        # 13개 늘었는데 **재현의 passed 는 115 에서 1도 안 움직였다.** 노드
+        # 회귀는 CI 가 못 잡는다 - 영구 락아웃(LATE_DROP_STREAK_MAX 우회)이
+        # 정확히 그 부류다.
+        #
+        # ⚠ 위 숫자는 테스트가 늘면 바뀐다. 인용하지 말고 재라:
+        #   bash scripts/check_ci_env.sh   (이 job 을 로컬에서 재현한다)
+        # 노드를 고쳤으면 rclpy 가 있는 곳에서 전체를 직접 돌릴 것.
+        # -rs 로 skip 사유를 로그에 남긴다.
         run: pytest src/roboworld_perception/test -q -rs
