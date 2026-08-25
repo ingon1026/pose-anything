@@ -417,13 +417,20 @@ class PerceptionNode(Node):
         if contract_error:
             # Resolution/frame switches often deliver a few images before the
             # matching CameraInfo.  Drop those frames and reset once, instead
-            # of mixing their depth with old intrinsics or spamming the log.
+            # of mixing their depth with old intrinsics.
             if contract_error != self._last_input_contract_error:
                 self._reset_input_state(contract_error)
-                self.get_logger().warn(
-                    f"RGB-D frame rejected; waiting for matching input: "
-                    f"{contract_error}")
                 self._last_input_contract_error = contract_error
+            # A mismatch that persists stops every publication for good.  One
+            # warning followed by silence is the shape 8d45975 named as silent
+            # failure - the node is alive with no error and no log.  The
+            # /perception/status heartbeat carries the same fact, but nothing
+            # in this repo subscribes to it, so the console is the only
+            # surface a person actually watches.  rclpy's Throttle filter does
+            # the suppressing, so no state and no parameter is added here.
+            self.get_logger().warn(
+                f"RGB-D frame rejected; waiting for matching input: "
+                f"{contract_error}", throttle_duration_sec=1.0)
             return
         self._last_input_contract_error = None
         stamp_s = (color_msg.header.stamp.sec

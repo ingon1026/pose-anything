@@ -1,0 +1,393 @@
+"""PerceptionNode 의 입력 계약·시계 판정 회귀 테스트.
+
+노드 코드는 GPU 도 bag 도 필요 없다 — 필요한 것은 rclpy 뿐이다. 따라서
+`Sam3Detector` 만 스텁으로 바꿔 **진짜 PerceptionPipeline** 을 쓴다.
+파이프라인을 통째로 가짜로 바꾸면 `time_reset_required` /
+`late_frame_drop_required` 의 진짜 의미가 사라져 "노드가 어떤 상태에서
+무엇을 부르는가" 를 못 본다 — 그게 2026-08-25 에 실제로 났던 버그다.
+"""
+import os
+import time
+
+import numpy as np
+import pytest
+
+# 테스트 노드가 살아 있는 스택에 붙어 /perception/detections 를 쏘지
+# 않도록 격리한다. rclpy import/init 보다 먼저 세워야 한다.
+os.environ.setdefault("ROS_DOMAIN_ID", "97")
+os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "OFF")
+
+# input_health.py 의 주석이 말하는 "경량 CI 환경" 에는 rclpy 가 없다.
+rclpy = pytest.importorskip("rclpy")
+
+from diagnostic_msgs.msg import DiagnosticStatus  # noqa: E402
+from sensor_msgs.msg import CameraInfo, Image  # noqa: E402
+from visualization_msgs.msg import Marker  # noqa: E402
+
+from roboworld_perception import perception_node as pn  # noqa: E402
+from roboworld_perception.input_health import (DIAG_ERROR, DIAG_OK,  # noqa: E402
+                                               DIAG_WARN)
+from roboworld_perception.pipeline import LATE_DROP_STREAK_MAX  # noqa: E402
+
+W, H = 64, 48
+FRAME = "camera_color_optical_frame"
+
+
+class _StubDetector:
+    """SAM3 자리. 검출 0개 — 파이프라인의 시간·계약 경로만 태운다."""
+
+    def __init__(self, *_, threshold=0.4, **__):
+        self.threshold = threshold
+
+    def detect(self, rgb, prompts):
+        return []
+
+
+def _info(fx=300.0, width=W, height=H, frame_id=FRAME):
+    msg = CameraInfo()
+    msg.width, msg.height = width, height
+    msg.header.frame_id = frame_id
+    msg.k = [fx, 0.0, width / 2, 0.0, fx, height / 2, 0.0, 0.0, 1.0]
+    return msg
+
+
+def _rgbd(stamp_s, width=W, height=H, frame_id=FRAME, depth_frame_id=None):
+    """같은 (w, h, frame_id) 에서 color/depth 를 함께 만든다 — 어긋남 방지."""
+    sec = int(stamp_s)
+    nanosec = int(round((stamp_s - sec) * 1e9))
+    color = Image()
+    color.height, color.width = height, width
+    color.encoding = "bgr8"
+    color.step = width * 3
+    color.data = np.zeros((height, width, 3), np.uint8).tobytes()
+    color.header.frame_id = frame_id
+    color.header.stamp.sec, color.header.stamp.nanosec = sec, nanosec
+    depth = Image()
+    depth.height, depth.width = height, width
+    depth.encoding = "16UC1"
+    depth.step = width * 2
+    depth.data = np.full((height, width), 1000, np.uint16).tobytes()
+    depth.header.frame_id = depth_frame_id or frame_id
+    depth.header.stamp.sec, depth.header.stamp.nanosec = sec, nanosec
+    return color, depth
+
+
+class _Harness:
+    """발행물과 error 로그를 가로채 보관한다.
+
+    on_frames 는 예외를 통째로 삼키고 error 로그만 남긴다. 그것을 안 보면
+    합성 메시지가 잘못돼 프레임이 사라져도 카운터 단언이 그대로 통과한다 —
+    통과가 증거가 아닌 바로 그 형태다. 그래서 errors 를 항상 확인한다.
+    """
+
+    def __init__(self, node):
+        self.node = node
+        self.det, self.markers, self.status, self.errors = [], [], [], []
+        node.pub_det.publish = self.det.append
+        node.pub_markers.publish = self.markers.append
+        node.pub_status.publish = self.status.append
+        node.pub_debug.publish = lambda msg: None
+        node.get_logger().error = self.errors.append
+        self.process_calls = 0
+        real_process = node.pipeline.process
+
+        def spy(*a, **kw):
+            self.process_calls += 1
+            return real_process(*a, **kw)
+
+        node.pipeline.process = spy
+
+    @property
+    def pipeline(self):
+        return self.node.pipeline
+
+    def frame(self, stamp_s, **kw):
+        self.node.on_frames(*_rgbd(stamp_s, **kw))
+
+    def deleteall_count(self):
+        return sum(1 for m in self.markers
+                   for mk in m.markers if mk.action == Marker.DELETEALL)
+
+    def latest_status(self):
+        """1 Hz 제한을 풀고 지금 상태를 한 장 받아온다."""
+        self.node._last_status_time = None
+        before = len(self.status)
+        self.node._publish_status()
+        assert len(self.status) == before + 1
+        return self.status[-1].status[0]
+
+
+def _level(status: DiagnosticStatus) -> int:
+    # 이 WSL 오버레이의 생성 바인딩은 level 이 1바이트 bytes 다.
+    return status.level[0] if isinstance(status.level, bytes) else status.level
+
+
+def _values(status: DiagnosticStatus) -> dict:
+    return {kv.key: kv.value for kv in status.values}
+
+
+@pytest.fixture
+def node(monkeypatch):
+    monkeypatch.setattr(pn, "Sam3Detector", _StubDetector)
+    rclpy.init()
+    n = pn.PerceptionNode()
+    try:
+        yield _Harness(n)
+    finally:
+        n.destroy_node()
+        rclpy.shutdown()
+
+
+# --- 양성 대조: 정상 프레임이 실제로 파이프라인까지 간다 ------------------
+# 이것이 없으면 아래 단언들은 "K 가 None 이라 첫 줄에서 return" 만으로도
+# 전부 통과한다.
+
+def test_normal_frame_reaches_pipeline(node):
+    node.node.on_info(_info())
+    node.frame(10.0)
+    assert node.errors == []
+    assert node.process_calls == 1
+    assert node.pipeline._last_stamp == 10.0
+    assert node.pipeline.late_frame_drops == 0
+    assert node.deleteall_count() == 0
+    assert len(node.det) == 1  # publish() 가 실제로 돌았다
+
+
+# --- /clock 리셋과 지연 프레임 ------------------------------------------
+
+def test_late_frame_is_dropped_inside_pipeline_not_by_the_node(node):
+    """time_reset_required=False · late_frame_drop_required=True 상태.
+
+    stamp 50.0 은 1.0s 를 넘으므로 시계 리셋 분기를 못 탄다. 노드가
+    이 프레임에서 먼저 return 하면 process 가 안 돌아 late_frame_drops 가
+    안 늘고 상계가 영원히 발화하지 않는다.
+    """
+    node.node.on_info(_info())
+    node.frame(100.0)
+    assert node.pipeline.time_reset_required(50.0) is False
+    assert node.pipeline.late_frame_drop_required(50.0) is True
+
+    node.frame(50.0)
+    assert node.errors == []
+    assert node.process_calls == 2          # 노드가 삼키지 않았다
+    assert node.pipeline.late_frame_drops == 1
+    assert node.pipeline._last_stamp == 100.0   # 지연 프레임은 시간을 되돌리지 않는다
+    assert node.deleteall_count() == 0          # 시계 리셋이 아니므로 회수 없음
+
+
+def test_late_drop_streak_reaches_its_bound_and_recovers(node):
+    """상계에 닿으면 시계가 옮겨간 것으로 보고 빠져나온다 — 영구 락아웃 금지."""
+    node.node.on_info(_info())
+    node.frame(100.0)
+    for _ in range(LATE_DROP_STREAK_MAX + 1):
+        node.frame(50.0)
+    assert node.errors == []
+    # 정확히 30 — reset() 을 타고도 살아남는 누적 카운터여야 한다
+    # (그래서 _reset_run_state 가 아니라 __init__ 에 있다).
+    assert node.pipeline.late_frame_drops == LATE_DROP_STREAK_MAX
+    # 락아웃이 풀렸다는 유일한 증거. 노드가 먼저 return 하면 100.0 에 영원히 갇힌다.
+    assert node.pipeline._last_stamp == 50.0
+
+
+def test_clock_reset_withdraws_detections_before_inference(node):
+    node.node.on_info(_info())
+    node.frame(100.0)
+    node.frame(0.5)  # <= 1.0s + 뒤로 감김 = 새 런
+    assert node.errors == []
+    assert node.deleteall_count() == 1
+    assert node.det[-2].detections == []      # 빈 Detection3DArray 로 회수
+    assert node.pipeline._last_stamp == 0.5
+
+
+# --- 프레임 계약 fail-closed --------------------------------------------
+
+@pytest.mark.parametrize("kw", [
+    {"width": 32},                       # 해상도 불일치
+    {"height": 24},
+    {"frame_id": "other_optical_frame"},  # color frame_id 불일치
+    {"depth_frame_id": "other_optical_frame"},  # depth 만 불일치
+])
+def test_mismatched_frame_is_rejected_whole(node, kw):
+    node.node.on_info(_info())
+    node.frame(10.0, **kw)
+    assert node.errors == []
+    assert node.process_calls == 0
+    assert node.pipeline._last_stamp is None
+    assert node.node._last_input_contract_error is not None
+    assert node.deleteall_count() == 1  # 회수는 즉시 보인다
+
+
+def test_repeated_mismatch_resets_once_not_every_frame(node):
+    node.node.on_info(_info())
+    for _ in range(5):
+        node.frame(10.0, width=32)
+    assert node.errors == []
+    assert node.process_calls == 0
+    assert node.deleteall_count() == 1
+
+
+def test_persistent_mismatch_keeps_warning(node):
+    """위반이 지속되는 동안 warn 호출을 멈추지 않는다.
+
+    회수(DELETEALL)는 첫 프레임에 한 번이면 되지만 경고까지 한 번이면
+    "경고 1줄 뒤 영구 무발행" 이 된다 — 노드는 살아 있고 에러도 로그도
+    없는데 아무것도 안 나가는, `8d45975` 가 무성 실패로 이름 붙인 그
+    형태다. /perception/status 가 같은 사실을 싣지만 이 저장소에서
+    그 토픽을 구독하는 곳이 없으므로, 사람이 실제로 보는 표면은
+    콘솔이다. 억제는 rclpy 의 Throttle(1초)이 하고 노드는 호출을
+    계속한다 — 그래서 노드에 상태도 파라미터도 안 늘어난다.
+    여기서 warn 을 가로채므로 throttle 을 안 타고 호출 수가 그대로 보인다.
+    """
+    node.node.on_info(_info())
+    warns = []
+    node.node.get_logger().warn = lambda msg, **kw: warns.append(msg)
+    for _ in range(5):
+        node.frame(10.0, width=32)
+    assert node.errors == []
+    assert node.process_calls == 0
+    assert node.deleteall_count() == 1  # 회수는 한 번
+    assert len(warns) == 5              # 경고는 매 프레임
+    # 진단도 계속 나간다. 단 이 루프는 _publish_status 를 직접 부르므로
+    # "1Hz 타이머가 계속 뛴다" 가 아니라 "지금 물어보면 ERROR 다" 만 본다.
+    for _ in range(3):
+        s = node.latest_status()
+        assert _level(s) == DIAG_ERROR
+        assert _values(s)["input_contract_valid"] == "false"
+
+
+def test_contract_error_clears_when_a_matching_frame_arrives(node):
+    """fail-closed 가 다시 안 열리면 그건 락아웃과 같은 부류의 버그다."""
+    node.node.on_info(_info())
+    node.frame(10.0, width=32)
+    node.frame(11.0)
+    assert node.errors == []
+    assert node.process_calls == 1
+    assert node.pipeline._last_stamp == 11.0
+    assert node.node._last_input_contract_error is None
+
+
+# --- CameraInfo 서명 변경 ------------------------------------------------
+
+def test_first_camera_info_does_not_reset(node):
+    node.node.on_info(_info())
+    assert node.deleteall_count() == 0
+    assert node.det == []
+
+
+def test_camera_info_signature_change_resets_and_is_visible(node):
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node.on_info(_info(fx=600.0))  # 재캘리브 = 다른 서명
+    assert node.errors == []
+    assert node.deleteall_count() == 1
+    assert node.det[-1].detections == []
+    assert node.pipeline._last_stamp is None  # 파이프라인 상태가 버려졌다
+    assert node.node._last_frame_time is None
+
+
+def test_identical_camera_info_does_not_reset(node):
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node.on_info(_info())
+    assert node.errors == []
+    assert node.deleteall_count() == 0
+    assert node.pipeline._last_stamp == 10.0
+
+
+def test_invalid_camera_info_drops_calibration_and_blocks_frames(node):
+    node.node.on_info(_info())
+    node.frame(10.0)
+    bad = _info()
+    bad.width = 0
+    node.node.on_info(bad)
+    assert node.node.K is None
+    assert node.deleteall_count() == 1
+    node.frame(11.0)
+    assert node.process_calls == 1  # 10.0 한 번뿐 — 낡은 K 로 역투영하지 않는다
+
+
+# --- /perception/status --------------------------------------------------
+
+def test_status_reports_error_before_camera_info(node):
+    s = node.latest_status()
+    assert _level(s) == DIAG_ERROR
+    assert s.message == "waiting for valid camera_info"
+    assert s.name == "roboworld_perception/input"
+    assert s.hardware_id == "rgbd_camera"
+    v = _values(s)
+    assert v["camera_info_valid"] == "false"
+    assert v["last_frame_age_s"] == "never"
+    assert v["last_processing_duration_ms"] == "never"
+    assert v["camera_image_size"] == "unknown"
+
+
+def test_status_warns_while_waiting_for_frames(node):
+    node.node.on_info(_info())
+    s = node.latest_status()
+    assert _level(s) == DIAG_WARN
+    assert s.message == "waiting for RGB-D frames"
+    v = _values(s)
+    assert v["camera_info_valid"] == "true"
+    assert v["camera_image_size"] == f"{W}x{H}"
+    assert v["camera_frame"] == FRAME
+
+
+def test_status_ok_after_a_frame(node):
+    node.node.on_info(_info())
+    node.frame(10.0)
+    assert node.errors == []
+    s = node.latest_status()
+    assert _level(s) == DIAG_OK
+    assert s.message == "RGB-D input healthy"
+    v = _values(s)
+    assert float(v["last_frame_age_s"]) < 1.0
+    assert float(v["last_processing_duration_ms"]) >= 0.0
+    assert v["out_of_order_frame_drops"] == "0"
+    assert v["input_error"] == ""
+
+
+def test_status_warns_when_input_goes_stale(node):
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node._last_frame_time = time.monotonic() - 10.0
+    assert node.errors == []
+    s = node.latest_status()
+    assert _level(s) == DIAG_WARN
+    assert s.message == "RGB-D input stale"
+    assert float(_values(s)["last_frame_age_s"]) > node.node._stale_timeout
+
+
+def test_status_reports_the_contract_error_text(node):
+    node.node.on_info(_info())
+    node.frame(10.0, width=32)
+    assert node.errors == []
+    s = node.latest_status()
+    assert _level(s) == DIAG_ERROR
+    assert s.message == "input contract invalid"
+    v = _values(s)
+    assert v["input_contract_valid"] == "false"
+    assert "do not match camera_info" in v["input_error"]
+
+
+def test_status_counts_out_of_order_drops(node):
+    """분기만 지우고 카운터가 없으면 이 진단은 항상 0 인 거짓말이 된다."""
+    node.node.on_info(_info())
+    node.frame(100.0)
+    node.frame(50.0)
+    assert node.errors == []
+    assert _values(node.latest_status())["out_of_order_frame_drops"] == "1"
+
+
+def test_status_is_rate_limited_to_1hz(node):
+    node.node.on_info(_info())
+    node.node._last_status_time = None
+    node.node._publish_status()
+    node.node._publish_status()
+    assert len(node.status) == 1
+
+
+def test_watchdog_publishes_the_heartbeat(node):
+    node.node.on_info(_info())
+    node.node._last_status_time = None
+    node.node._watchdog()
+    assert len(node.status) == 1
