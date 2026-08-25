@@ -61,7 +61,7 @@
 | `enable_footprint_gate` | **켜짐** | [footprint_gate](footprint_gate_2026-08-21.md) "비대칭 판정" 절 · `5a4d173` |
 | `enable_merge` | **켜짐** | `5d687bf`. 실기는 `max_per_label==1` 조기 반환으로 구조적 no-op |
 | `detect_interval` | **5** (Isaac 은 1) | [detect_interval](detect_interval_2026-08-21.md) |
-| `image_size` | 기본 1008, **Isaac 672** | [image_size](image_size_2026-08-21.md) ③ — 근거는 VRAM 이 아니라 **속도**. **라이브 재측정으로 확인(4.98 vs 2.68 Hz, −46.1%)** — 큐 변경 이후·전제 검사 통과 |
+| `image_size` | 기본 1008, **Isaac 672** | [image_size](image_size_2026-08-21.md) ③ — 근거는 VRAM 이 아니라 **속도**. **라이브 재측정으로 확인 — 현재 HEAD 에서 4.72 vs 2.72 Hz (−42.4%)**. 전제 검사 통과. (17:04 의 4.98/2.68 은 이후 폐기된 빌드 값) |
 | `MAX_THICKNESS` | 0.35m | `aaf9993`. 비율 규칙은 세운 원통에서 깨진다 |
 | `LE_REJECT_STREAK` | 3 | `a65e273`. extent 기각 탈출을 "유한" 이 아니라 **상계**로 |
 | `LATE_DROP_STREAK_MAX` | 30 | 2026-08-24. 지연 프레임 드롭이 `_last_stamp` 를 전진시키지 않아 **영구 락아웃**이 될 수 있었다 — `time_reset_required` 가 `stamp ≤ 1.0s` 를 요구하므로 `/clock` reset 후 첫 처리 프레임이 1초를 넘으면 reset 분기를 못 타고 드롭만 반복한다. **노드는 살아 있고 에러도 로그도 없다.** 재현 후 상계로 고쳤다 — `LE_REJECT_STREAK` 과 **같은 이유로 "유한" 이 아니라 "상계"** 다(§5 마지막 항목) |
@@ -123,7 +123,7 @@
 |---|---|---|
 | `PUB_POS_STD_MAX` (현 0.02) | σ↔오차 표는 있다. 커버리지 40~47% 를 잃고 오염을 1/3 로 줄이는 교환 | [publish_gap](publish_gap_2026-08-24.md) |
 | 경계 물체 발행 정책 | 3갈래 — 치수만 불신 / `covariance` 로 알림 / 발행 안 함 | [truncation_unify](truncation_unify_2026-08-24.md), [border_margin](border_margin_2026-08-21.md) |
-| `image_size` 672 vs 1008 | 속도(**4.98 vs 2.68 Hz, −46.1%** — 라이브 유효 측정) ↔ **폭** 3.0mm(정답 55.0 대비 −8.2 vs −5.2). 두께는 무관 | [image_size](image_size_2026-08-21.md) ③④ |
+| `image_size` 672 vs 1008 | 속도(**4.72 vs 2.72 Hz, −42.4%** — 현재 HEAD 라이브) ↔ **폭** 3.0mm(정답 55.0 대비 −8.2 vs −5.2). 두께는 무관 | [image_size](image_size_2026-08-21.md) ③④ |
 
 ### 값 변경 — 완료된 것도 이유와 함께 남긴다
 | 항목 | 상태 | 출처 |
@@ -134,7 +134,7 @@
 ### 측정하면 답이 나오는 것
 | 항목 | 출처 |
 |---|---|
-| **4.98 / 2.68 Hz 를 폐기되지 않은 빌드에서 재측정** — 그 측정은 구독 QoS(BEST_EFFORT/depth 1)가 있던 빌드였고 그 코드가 폐기됐다. 비율(−46.1%)은 상대 비교로 유효하나 절대 Hz 는 아니다 | [image_size](image_size_2026-08-21.md) ③ |
+| ~~4.98 / 2.68 Hz 재측정~~ **완료 2026-08-24** — 현재 HEAD 에서 **4.72 / 2.72 Hz (−42.4%)**. 구독 QoS 가 빠져 672 만 5% 손해, 결론(672 유지) 불변 | [image_size](image_size_2026-08-21.md) ③ |
 | `torchao` cpp ext 경고(torch 2.10 < 2.11)가 속도에 영향이 있는지 — **SAM3 경로가 torchao 를 쓰는 흔적이 없어 무관일 가능성이 크다.** 업그레이드 시 ③ 표를 한 번 재면 닫힌다 | [image_size](image_size_2026-08-21.md) ③ |
 | 침식(`erode_px=3`)이 폭 과소 −5.2mm 를 얼마나 설명하는지 — 축당 2px(5.9mm) 절삭은 합성 마스크로 실증, **종단 A/B 는 하네스 결함으로 중단**(`run_offline.py:184-188`). A/B 는 **0/3/5** 로 짤 것(`erode_px=1` 은 무동작) | [image_size](image_size_2026-08-21.md) ④ |
 | **`min_inlier_ratio` 는 평면 품질과 무상관이다**(합성 29표본 corr **+0.066**). 잔차 RMS(+0.652)·반복 불일치(+0.486)가 더 나은 후보이나 **아직 게이트로 넣으면 안 된다** — 표본 29개·나쁜 클래스 6개뿐이고 `RMS>1.5mm` 동작점의 오탈락이 **39%** 다. 실측: test2 는 문턱을 통과하는데 실행 간 평면 `d` 산포가 **±13mm 급**(Isaac ±0.40 / test4 ±2.98) | [belt_plane](belt_plane_2026-08-21.md) "품질을 재고 있지 않다" |
@@ -166,7 +166,7 @@
   - 키프레임 시간 — `image_size` 없이는 무의미(672 vs 1008 이 2.25배)
   - **속도·발행률 — 측정 조건을 같이 적을 것: 라이브인지, 전제 검사를 통과했는지,
     동기화 큐 설정, 어느 빌드인지.** `image_size` 672 의 **유일한 근거**인
-    **4.98 vs 2.68 Hz(−46.1%)** 는([image_size](image_size_2026-08-21.md) ③)
+    **4.72 vs 2.72 Hz(−42.4%)** 는([image_size](image_size_2026-08-21.md) ③)
     `scripts/measure_vram.sh` 라이브 측정이고, **전제 검사 통과**(Publisher
     count 1 · 입력 26.5~29.0 Hz · 검출 실제 발행) · `sync_queue_size=1` 이후
     빌드다. **전제 검사가 왜 필요한지는 §3-1 을 볼 것** — 그게 없던 아침 측정은
