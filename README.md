@@ -98,8 +98,18 @@ There is no automated accuracy gate in CI — the bags and the reference CSVs ar
 not in this repository (`bags/`, `output/` are gitignored), so this has to be run
 by hand on a machine that has them:
 
-1. **Reference** — replay a bag on a known-good build and keep the CSV:
-   `python3 scripts/run_offline.py --bag bags/isaac_belt_moving --prompts "blue bar with holes" --out output/ref_<date>`
+1. **Reference** — replay a bag on a known-good build and keep the CSV. **Pass the
+   shipping preset explicitly** — the script's own defaults are *not* what ships
+   (`image_size` 1008 vs 672, `detect_interval` 5 vs 1, and `max_per_prompt` **1**,
+   which silently gates the 8-block Isaac scene down to a single track and exercises
+   neither merging nor the footprint gate). The values below mirror `isaac.launch.py`:
+
+   ```bash
+   python3 scripts/run_offline.py --bag bags/isaac_belt_moving \
+       --prompts "blue bar with holes" \
+       --image-size 672 --detect-interval 1 --max-per-prompt 10 \
+       --out output/ref_<date>
+   ```
 2. **Candidate** — replay the *same* bag on the build you intend to ship, into a
    different `--out` directory.
 3. **Judge** — `python3 scripts/check_accuracy.py --ref output/ref_<date> --cand output/<candidate>`
