@@ -167,5 +167,5 @@ backpack   0.77  ← black bag 0.96 보다 나쁘다. 어깨끈이 뚜렷해도 
 | Needed bag | Enables |
 |---|---|
 | Motorized conveyor, constant speed, objects passing | Kalman coasting + constant-velocity validation |
-| Motorized conveyor + occlusion during motion | moving-occlusion handling (Kalman-gated re-matching) |
+| Motorized conveyor + occlusion during motion | moving-occlusion handling (Kalman-gated re-matching)<br>**⚠ 속도 하한이 필수다** — 46mm/s(현행 벨트)로 찍으면 삭제 타임아웃(6.0s)이 위치 게이트(물체 폭×2.5)보다 항상 먼저 발화해 같은 결론이 반복될 뿐이다. **벨트 ≥140mm/s + 가림 2~3s**, 또는 60~140mm/s 면 **가림 4~6s**. 물체는 폭 ~130mm 이하 포함(게이트가 폭에 비례). 성립 조건: 가림 중 물체가 자기 폭의 2.5배 이상 이동 |
 | Scene with printed ArUco markers | absolute pose error measurement |
