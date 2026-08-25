@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     ros-jazzy-realsense2-camera \
     ros-jazzy-rviz2 \
     ros-jazzy-vision-msgs \
+    ros-jazzy-diagnostic-msgs \
     ros-jazzy-rosbag2-storage-mcap \
     fonts-noto-cjk \
     libgl1 libgomp1 usbutils \

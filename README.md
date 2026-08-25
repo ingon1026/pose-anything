@@ -191,6 +191,7 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 | `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, geometric OBB pose, size, covariance — in the camera optical frame reported by `camera_info` |
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
+| `/perception/status` | `diagnostic_msgs/DiagnosticArray` | 입력 건강 하트비트, **1 Hz**. `status[0].name = roboworld_perception/input`, `hardware_id = rgbd_camera` |
 
 **Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,

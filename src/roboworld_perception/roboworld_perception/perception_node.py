@@ -9,9 +9,11 @@ import time
 
 import numpy as np
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Point, TransformStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
+from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import ColorRGBA, String
@@ -22,8 +24,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 import cv2
 
 from .overlay import PALETTE, draw_objects, draw_status, show_window
+from .input_health import classify_input_health
 from .pipeline import (CSV_HEADER, PerceptionPipeline, csv_row, img_to_np,
                        parse_plane, status_text)
+from .pose_covariance import published_pose_covariance
 from .sam3_detector import PROMPT_ALIASES, Sam3Detector, parse_prompts
 
 # ponytail: manual Image<->numpy instead of cv_bridge (its binary is built
@@ -37,6 +41,64 @@ def np_to_imgmsg(bgr: np.ndarray) -> Image:
     msg.step = msg.width * 3
     msg.data = np.ascontiguousarray(bgr).tobytes()
     return msg
+
+
+def camera_info_contract(msg: CameraInfo):
+    """Return the calibration used by the pipeline and its input contract.
+
+    The projection matrix is only valid for the exact image geometry and
+    optical frame that produced it.  Keep those values together so callers
+    cannot accidentally update ``K`` while retaining an old frame contract.
+    """
+    width, height = int(msg.width), int(msg.height)
+    frame_id = msg.header.frame_id
+    k = np.asarray(msg.k, dtype=float)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"invalid image size {width}x{height}")
+    if not frame_id:
+        raise ValueError("camera_info frame_id is empty")
+    if k.size != 9:
+        raise ValueError(f"camera_info K has {k.size} values (expected 9)")
+    K = k.reshape(3, 3)
+    if not np.isfinite(K).all() or K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise ValueError("camera_info K must be finite with positive fx/fy")
+    # A tuple makes equality exact and intentionally catches even a small
+    # recalibration: mixing observations from before and after it is unsafe.
+    signature = (width, height, frame_id, tuple(K.ravel()))
+    return K, signature
+
+
+def frame_contract_error(color_msg: Image, depth_msg: Image, signature):
+    """Return why an RGB-D pair cannot be projected with ``signature``.
+
+    Depth is subscribed from an *aligned-to-color* topic, therefore both
+    images must have the CameraInfo geometry and optical frame exactly.
+    """
+    width, height, frame_id, _ = signature
+    if (color_msg.width, color_msg.height) != (width, height):
+        return ("color dimensions %dx%d do not match camera_info %dx%d" %
+                (color_msg.width, color_msg.height, width, height))
+    if (depth_msg.width, depth_msg.height) != (width, height):
+        return ("aligned depth dimensions %dx%d do not match camera_info %dx%d" %
+                (depth_msg.width, depth_msg.height, width, height))
+    if color_msg.header.frame_id != frame_id:
+        return ("color frame_id %r does not match camera_info %r" %
+                (color_msg.header.frame_id, frame_id))
+    if depth_msg.header.frame_id != frame_id:
+        return ("aligned depth frame_id %r does not match camera_info %r" %
+                (depth_msg.header.frame_id, frame_id))
+    return None
+
+
+def set_diagnostic_level(status, level):
+    """Set ``DiagnosticStatus.level`` across ROS Python generator variants.
+
+    Current upstream generators use an int.  This WSL overlay's older
+    generated binding uses a one-byte ``bytes`` field and aborts in C on an
+    int during publish.  Inspecting the freshly-created field keeps both
+    ABIs working without weakening the DiagnosticStatus contract.
+    """
+    status.level = bytes((level,)) if isinstance(status.level, bytes) else level
 
 
 class PerceptionNode(Node):
@@ -63,7 +125,16 @@ class PerceptionNode(Node):
         # 안 붙으면 slop 을 올리기 전에 브리지부터 볼 것 — 양쪽에 LARGE_DATA
         # 전송 설정이 있는가. docs/bridge_contract.md 참고.
         self.declare_parameter("sync_slop", 0.05)
-        self.declare_parameter("sync_queue_size", 5)
+        # 동기화기 자체의 보관량도 작게 잡아야 input_qos_depth=1 의
+        # "최신 프레임 우선" 계약이 지켜진다. 느린 추론 중 누적된 짝을
+        # 순서대로 꺼내면 실제 벨트보다 과거 pose를 내기 때문이다.
+        self.declare_parameter("sync_queue_size", 1)
+        # 추론은 입력보다 느릴 수 있다. ROS 수신 큐가 여러 장을 보관하면
+        # 단일 executor의 callback이 오래된 RGB-D 쌍을 순서대로 추론해
+        # 실제 벨트 위치보다 한참 늦은 pose를 낸다. 각 스트림에는 최신 한
+        # 장만 남긴다. depth/color는 동시 발행이므로 ATS의 짝짓기 창은
+        # 별도로 유지한다.
+        self.declare_parameter("input_qos_depth", 1)
         # 발행 점수 하한. 0.0 = 끔. 근거와 주의는 Track.publishable 의 주석.
         # 중복 병합 — 벨트 씬에서 보정된 상수라 기본 꺼짐 (tracker.KAPPA_PHYS 주석)
         self.declare_parameter("enable_merge", True)
@@ -80,11 +151,10 @@ class PerceptionNode(Node):
         self.declare_parameter("enable_footprint_gate", True)
         self.declare_parameter("use_belt_plane", True)
         self.declare_parameter("belt_plane", "")  # "a,b,c,d" (n·p+d=0), 빈 값=추정
-        # 카메라가 "위(1m)에서 아래를 본다"는 world TF. RealSense TF 트리의
-        # 뿌리(camera_link) 위에 붙인다 — optical frame에 직접 붙이면 bag이
-        # 함께 녹화한 내부 트리와 부모가 둘이 되어 TF가 깨진다. 실제 로봇
-        # TF 트리와 통합할 때는 이 파라미터를 꺼서 충돌을 피한다.
-        self.declare_parameter("publish_world_tf", True)
+        # 이 값은 캘리브레이션된 world TF가 아니라 RViz 전용의 공칭 카메라
+        # 위치다. 로봇 base/world 좌표로 오인되면 위험하므로 기본 발행하지
+        # 않는다. 실제 셀에서는 hand-eye/URDF TF를 외부에서 발행해야 한다.
+        self.declare_parameter("publish_world_tf", False)
         # camera_link -> camera_color_optical_frame. RealSense 드라이버가 돌면
         # 드라이버가 채워주므로 건드릴 필요가 없지만, Isaac Sim 이 이미지를
         # 직접 발행하는 구성에는 드라이버가 없어 이 링크를 아무도 안 보낸다.
@@ -114,6 +184,9 @@ class PerceptionNode(Node):
         optical_frame = self.get_parameter("optical_frame").value
         static_tfs = []
         if self.get_parameter("publish_world_tf").value:
+            self.get_logger().warn(
+                "publish_world_tf=true: publishing an uncalibrated nominal "
+                "RViz-only transform; do not use it for robot coordinates")
             t = TransformStamped()
             t.header.stamp = self.get_clock().now().to_msg()
             t.header.frame_id = world_frame
@@ -168,10 +241,14 @@ class PerceptionNode(Node):
 
         self.K = None
         self.frame_id = optical_frame
+        self._camera_info_signature = None
+        self._last_input_contract_error = None
         self._busy = False
         self._display = self.get_parameter("display").value
         self._fps_ema = 0.0
         self._last_frame_time = None
+        self._last_process_ms = None
+        self._last_status_time = None
         self._stale_cleared = True
         self._stale_timeout = float(self.get_parameter("stale_timeout").value)
         # 직전 사이클에 실제로 발행한 (ns, id). 사라진 것만 골라 지우기 위해
@@ -185,15 +262,36 @@ class PerceptionNode(Node):
         self.pub_markers = self.create_publisher(MarkerArray,
                                                  "/perception/markers", 10)
         self.pub_debug = self.create_publisher(Image, "/perception/debug_image", 10)
+        self.pub_status = self.create_publisher(DiagnosticArray,
+                                                "/perception/status", 10)
 
         self.create_subscription(CameraInfo,
                                  self.get_parameter("info_topic").value,
                                  self.on_info, 10)
         self.create_subscription(String, "/perception/prompt", self.on_prompt, 10)
+        requested_qos_depth = self.get_parameter("input_qos_depth").value
+        input_qos_depth = max(1, int(requested_qos_depth))
+        if input_qos_depth != requested_qos_depth:
+            self.get_logger().warn(
+                "input_qos_depth must be >= 1; using latest-only depth=1")
+        input_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=input_qos_depth,
+            # 센서 데이터는 유실보다 최신성이 우선이다. RELIABLE publisher와도
+            # 호환되며, BEST_EFFORT 카메라 publisher에도 붙을 수 있다.
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        )
+        requested_sync_queue_size = self.get_parameter("sync_queue_size").value
+        sync_queue_size = max(1, int(requested_sync_queue_size))
+        if sync_queue_size != requested_sync_queue_size:
+            self.get_logger().warn(
+                "sync_queue_size must be >= 1; using latest-only depth=1")
         sync = ApproximateTimeSynchronizer(
-            [Subscriber(self, Image, self.get_parameter("color_topic").value),
-             Subscriber(self, Image, self.get_parameter("depth_topic").value)],
-            queue_size=self.get_parameter("sync_queue_size").value,
+            [Subscriber(self, Image, self.get_parameter("color_topic").value,
+                        qos_profile=input_qos),
+             Subscriber(self, Image, self.get_parameter("depth_topic").value,
+                        qos_profile=input_qos)],
+            queue_size=sync_queue_size,
             slop=self.get_parameter("sync_slop").value)
         sync.registerCallback(self.on_frames)
 
@@ -206,10 +304,53 @@ class PerceptionNode(Node):
             self.csv_writer.writerow(CSV_HEADER)
 
     def on_info(self, msg: CameraInfo):
-        if self.K is None:
-            self.K = np.array(msg.k).reshape(3, 3)
-            self.frame_id = msg.header.frame_id
-            self.get_logger().info(f"camera_info received, frame={self.frame_id}")
+        try:
+            K, signature = camera_info_contract(msg)
+        except ValueError as e:
+            # Without valid calibration, accepting the previous K for a new
+            # stream would silently project pixels into the wrong 3D rays.
+            if self.K is not None:
+                self._reset_input_state("invalid camera_info")
+            self.K = None
+            self._camera_info_signature = None
+            self._last_input_contract_error = f"invalid camera_info: {e}"
+            self.get_logger().error(f"camera_info rejected: {e}")
+            return
+
+        was_configured = self._camera_info_signature is not None
+        changed = was_configured and signature != self._camera_info_signature
+        self.K = K
+        self.frame_id = signature[2]
+        self._camera_info_signature = signature
+        self._last_input_contract_error = None
+        if changed:
+            self._reset_input_state("camera_info changed")
+            self.get_logger().warn(
+                "camera_info changed (size, intrinsics, or frame); "
+                "tracker reset before accepting new RGB-D frames")
+        elif not was_configured:
+            self.get_logger().info(
+                f"camera_info received, {signature[0]}x{signature[1]}, "
+                f"frame={self.frame_id}")
+
+    def _reset_input_state(self, reason):
+        """Forget observations and explicitly withdraw output after a reset."""
+        self.pipeline.reset()
+        self._last_frame_time = None
+        self._stale_cleared = True
+        self._prev_marker_ids = set()
+
+        # A reset must be visible to consumers immediately; otherwise a robot
+        # can keep acting on the last detection while this node waits for a
+        # compatible frame.  The next valid frame repopulates both topics.
+        empty = Detection3DArray()
+        empty.header.stamp = self.get_clock().now().to_msg()
+        empty.header.frame_id = self.frame_id
+        self.pub_det.publish(empty)
+        markers = MarkerArray()
+        markers.markers.append(Marker(action=Marker.DELETEALL))
+        self.pub_markers.publish(markers)
+        self.get_logger().info(f"input contract reset: {reason}")
 
     def on_prompt(self, msg: String):
         self.prompts = parse_prompts(msg.data)
@@ -217,10 +358,9 @@ class PerceptionNode(Node):
         self.get_logger().info(f"prompts -> {self.prompts}")
 
     def _watchdog(self):
-        """입력이 끊기면(bag 종료 등) 잔상 마커를 정리한다."""
-        if self._stale_cleared or self._last_frame_time is None:
-            return
-        if time.monotonic() - self._last_frame_time > self._stale_timeout:
+        """Clear stale markers and publish the one-Hz input health heartbeat."""
+        if (not self._stale_cleared and self._last_frame_time is not None and
+                time.monotonic() - self._last_frame_time > self._stale_timeout):
             markers = MarkerArray()
             markers.markers.append(Marker(action=Marker.DELETEALL))
             self.pub_markers.publish(markers)
@@ -228,23 +368,87 @@ class PerceptionNode(Node):
             self._prev_marker_ids = set()
             self.get_logger().info(
                 "입력 없음 %.1f초 — 마커 정리" % self._stale_timeout)
+        self._publish_status()
+
+    def _publish_status(self):
+        """Publish externally consumable input validity and timing state."""
+        now = time.monotonic()
+        if (self._last_status_time is not None
+                and now - self._last_status_time < 1.0):
+            return
+        self._last_status_time = now
+        level, message, frame_age_s = classify_input_health(
+            now, self.K is not None, self._last_frame_time,
+            self._stale_timeout, self._last_input_contract_error)
+        status = DiagnosticStatus()
+        set_diagnostic_level(status, level)
+        status.name = "roboworld_perception/input"
+        status.hardware_id = "rgbd_camera"
+        status.message = message
+        signature = self._camera_info_signature
+        status.values = [
+            KeyValue(key="camera_info_valid", value=str(self.K is not None).lower()),
+            KeyValue(key="input_contract_valid",
+                     value=str(self._last_input_contract_error is None).lower()),
+            KeyValue(key="last_frame_age_s",
+                     value="never" if frame_age_s is None else f"{frame_age_s:.3f}"),
+            KeyValue(key="last_processing_duration_ms",
+                     value=("never" if self._last_process_ms is None else
+                            f"{self._last_process_ms:.1f}")),
+            KeyValue(key="out_of_order_frame_drops",
+                     value=str(self.pipeline.late_frame_drops)),
+            KeyValue(key="stale_timeout_s", value=f"{self._stale_timeout:.1f}"),
+            KeyValue(key="camera_frame", value=self.frame_id),
+            KeyValue(key="camera_image_size",
+                     value=("unknown" if signature is None else
+                            f"{signature[0]}x{signature[1]}")),
+            KeyValue(key="input_error", value=self._last_input_contract_error or ""),
+        ]
+        heartbeat = DiagnosticArray()
+        heartbeat.header.stamp = self.get_clock().now().to_msg()
+        heartbeat.status.append(status)
+        self.pub_status.publish(heartbeat)
 
     def on_frames(self, color_msg: Image, depth_msg: Image):
         if self.K is None or self._busy or not self.prompts:
             return  # ponytail: drop frames while inference is running
+        contract_error = frame_contract_error(
+            color_msg, depth_msg, self._camera_info_signature)
+        if contract_error:
+            # Resolution/frame switches often deliver a few images before the
+            # matching CameraInfo.  Drop those frames and reset once, instead
+            # of mixing their depth with old intrinsics or spamming the log.
+            if contract_error != self._last_input_contract_error:
+                self._reset_input_state(contract_error)
+                self.get_logger().warn(
+                    f"RGB-D frame rejected; waiting for matching input: "
+                    f"{contract_error}")
+                self._last_input_contract_error = contract_error
+            return
+        self._last_input_contract_error = None
+        stamp_s = (color_msg.header.stamp.sec
+                   + color_msg.header.stamp.nanosec * 1e-9)
+        if self.pipeline.time_reset_required(stamp_s):
+            # Withhold the previous run's detections before SAM inference;
+            # otherwise a consumer can act on a latched old Detection3DArray
+            # for the entire model latency after /clock resets.
+            self._reset_input_state("camera timestamp reset")
+        # 지연 프레임은 여기서 거르지 않는다 — pipeline.process() 안의
+        # LATE_DROP_STREAK_MAX 상계를 타야 한다. 노드가 먼저 return 하면
+        # pipeline._late_drops 가 안 늘어 상계가 영원히 발화하지 않고,
+        # 그 경로는 _last_stamp 를 전진시키지 않으므로 한 번 빠지면 노드
+        # 재시작 외에 회복이 없다 (docs/README.md 의 LATE_DROP_STREAK_MAX 행).
         self._busy = True
         self._last_frame_time = time.monotonic()
         self._stale_cleared = False
+        t0 = time.perf_counter()
         try:
-            t0 = time.perf_counter()
             img = img_to_np(color_msg)
             if color_msg.encoding == "rgb8":
                 rgb, bgr = img, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             else:
                 rgb, bgr = cv2.cvtColor(img, cv2.COLOR_BGR2RGB), img.copy()
             depth = img_to_np(depth_msg)
-            stamp_s = color_msg.header.stamp.sec + \
-                color_msg.header.stamp.nanosec * 1e-9
             objects = self.pipeline.process(rgb, depth, self.K, self.prompts,
                                             stamp_s)
             proc_ms = (time.perf_counter() - t0) * 1000
@@ -252,7 +456,13 @@ class PerceptionNode(Node):
         except Exception as e:  # keep the node alive on a bad frame
             self.get_logger().error(f"frame failed: {e}")
         finally:
+            self._last_process_ms = (time.perf_counter() - t0) * 1000
             self._busy = False
+            # The single-threaded executor can spend all its time in image
+            # callbacks, starving the one-second timer. Publish from the
+            # completed-work path too; _publish_status keeps the public rate
+            # at at most 1 Hz.
+            self._publish_status()
 
     def publish(self, objects, stamp, bgr, proc_ms):
         det_array = Detection3DArray()
@@ -283,13 +493,9 @@ class PerceptionNode(Node):
             hyp.pose.pose.orientation.y = qy
             hyp.pose.pose.orientation.z = qz
             hyp.pose.pose.orientation.w = qw
-            # 융합 필터의 위치 불확실성을 표준 covariance 필드로 전달 —
-            # 로봇 측 파지 게이팅(방안2)이 이 값을 소비한다. 회전은 필터
-            # 밖(미추정)이라 0 유지.
-            var = obj.filter.pos_var.tolist()
-            hyp.pose.covariance[0] = var[0]
-            hyp.pose.covariance[7] = var[1]
-            hyp.pose.covariance[14] = var[2]
+            # 위치는 융합 필터의 분산(m²), OBB 회전은 미추정이므로 보수적인
+            # 유한 분산(rad²)을 넣는다. 0은 "정확히 안다"라는 뜻이라 금지.
+            hyp.pose.covariance = published_pose_covariance(obj.filter.pos_var)
             det.results.append(hyp)
             det.bbox.center = hyp.pose.pose
             det.bbox.size.x, det.bbox.size.y, det.bbox.size.z = o.extent

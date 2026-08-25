@@ -48,7 +48,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 38; 40; 46
-    Fixed Frame: world
+    Fixed Frame: camera_color_optical_frame
     Frame Rate: 30
   Name: root
   Tools:

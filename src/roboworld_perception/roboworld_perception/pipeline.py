@@ -304,6 +304,9 @@ class PerceptionPipeline:
         self._plane_tried = False
         # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
         self.enable_footprint_gate = enable_footprint_gate
+        # 진단용 누적 카운터 — _reset_run_state() 가 아니라 여기 둔다.
+        # reset() 으로 0 이 되면 "이번 런에서 몇 번 드롭됐나" 를 못 센다.
+        self.late_frame_drops = 0
         self._reset_run_state()
 
     def _reset_run_state(self):
@@ -334,10 +337,9 @@ class PerceptionPipeline:
         """Whether ``stamp_s`` belongs to a new, reset clock run.
 
         ``process`` 가 스스로 이 술어를 쓴다. public 인 것은 ROS 노드가
-        다음 검출 전에 마지막 Detection3DArray 를 회수할 수 있게 하려던
-        것인데, **지금 저장소의 노드는 이걸 부르지 않는다** — 그 호출자는
-        커밋되지 않은 채로 버려졌다. 노드 쪽을 다시 붙일 때까지 이 메서드의
-        유일한 실사용자는 process 다.
+        다음 검출 전에 마지막 Detection3DArray 를 회수하기 위해서다 —
+        모델 지연(148~301ms) 동안 소비자가 옛 검출을 붙잡고 행동하지
+        못하게 한다. 노드 호출자는 2026-08-25 에 붙었다.
         """
         return (self._last_stamp is not None
                 and self._last_stamp > STAMP_RESET_NEW_RUN_MAX_S
@@ -345,7 +347,15 @@ class PerceptionPipeline:
                 and stamp_s < self._last_stamp - STAMP_RESET_BACKWARD_S)
 
     def late_frame_drop_required(self, stamp_s):
-        """Whether an out-of-order frame must be ignored without rewinding state."""
+        """Whether an out-of-order frame must be ignored without rewinding state.
+
+        **노드는 이걸 부르면 안 된다.** 이 술어만 보고 노드가 먼저 return
+        하면 process 안의 LATE_DROP_STREAK_MAX 상계를 건너뛰고, 그 경로는
+        _last_stamp 를 전진시키지 않으므로 한 번 빠지면 노드 재시작 외에
+        회복이 없다. 실제로 그런 호출자가 한 번 들어왔다가 걷어냈다
+        (2026-08-25). 드롭 판정은 process 가 소유한다 — 노드는 진단용으로
+        late_frame_drops 를 읽기만 한다.
+        """
         return (self._last_stamp is not None
                 and stamp_s < self._last_stamp - STAMP_RESET_BACKWARD_S
                 and not self.time_reset_required(stamp_s))
@@ -382,6 +392,7 @@ class PerceptionPipeline:
             #
             # 상계에 닿으면 시계가 실제로 옮겨간 것으로 결론내고 reset 한다.
             self._late_drops += 1
+            self.late_frame_drops += 1
             if self._late_drops == 1:
                 print(f"[stamp] 지연 프레임 드롭 시작 (stamp={stamp_s:.3f} < "
                       f"last={self._last_stamp:.3f})", flush=True)

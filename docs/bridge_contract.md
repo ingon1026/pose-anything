@@ -34,17 +34,27 @@ tr '\0' '\n' < /proc/$(pgrep -f perception_node)/environ | grep FASTDDS
 Isaac 이 `/clock` 을 발행한다(약 85 Hz, `resetOnStop=True`). 시간을 쓰는
 **모든 노드**에 `use_sim_time=true` 를 줄 것. rviz2 포함.
 
-```python
-Node(..., parameters=[{'use_sim_time': True}])
+`isaac.launch.py`는 이 값을 기본 `true`로 선언하고, base launch가 동일한
+bool 값을 perception 노드와 RViz에 함께 전달한다. 일반
+`perception.launch.py`의 기본값은 `false`다.
+
+수동 실행 또는 다른 launch를 쓸 때도 둘을 함께 맞춘다:
+
+```bash
+ros2 launch roboworld_perception perception.launch.py use_sim_time:=true
 ```
 
 **일부만 켜면 안 된다** — 켠 노드와 안 켠 노드가 다른 시간축을 쓰게 되어
 TF 와 message_filters 가 조용히 깨진다.
 
-### 1.3 Isaac 을 재시작하면 비전 노드도 재시작할 것
+### 1.3 Isaac 을 재시작하면 비전 노드 상태를 확인할 것
 
 Isaac 재기동 시 sim time 이 0 으로 되감기고 ROS2 퍼블리셔가 새로 만들어진다.
-그 전에 떠 있던 구독자는 재매칭되지 않는다. 증상은 "토픽은 보이는데 입력 없음".
+비전 파이프라인은 0.5초를 넘는 시간 역행을 감지하면 track·filter·광학흐름
+상태를 자동으로 비워, 이전 run의 pose를 새 시간축에서 발행하지 않는다.
+
+다만 그 전에 떠 있던 구독자가 재매칭되지 않는 경우는 별개다. 증상은
+"토픽은 보이는데 입력 없음"이며, 이때는 비전 노드도 재시작한다.
 
 ---
 
@@ -78,6 +88,11 @@ Isaac 재기동 시 sim time 이 0 으로 되감기고 ROS2 퍼블리셔가 새�
 **slop 을 크게 두지 말 것** — 서로 다른 순간의 프레임을 잘못 묶는다.
 다시 "입력 없음" 이 나오면 slop 을 올리기 전에 **1.1 의 전송 설정부터 확인**할 것.
 
+비전 노드는 `input_qos_depth=1`로 각 RGB/depth 스트림에서 최신 메시지 하나만
+보관한다. SAM 추론이 입력보다 느릴 때 오래된 프레임을 순서대로 처리하는 대신
+지연을 버리는 정책이다. 정확한 end-to-end 지연은 실제 로봇 투입 전에 별도로
+측정해야 한다.
+
 ### 2.3 카메라 내부 파라미터
 
 ```
@@ -93,12 +108,15 @@ distortion      plumb_bob, d = [0,0,0,0,0]  (왜곡 없음)
 
 ### 2.4 TF
 
-```
-world → camera_link → camera_color_optical_frame
-```
+브리지가 보장하는 프레임은 `camera_color_optical_frame` 뿐이다. 비전 노드는
+기본값으로 `world` TF를 만들지 않는다. `world → camera_link`는 카메라 설치와
+hand-eye 보정으로 얻은 변환을 로봇/셀 TF 트리에서 발행해야 한다.
 
-`publish_optical_tf=true` 로 노드가 직접 발행한다(RealSense 드라이버가 없으므로).
-`rviz/perception.rviz` 의 `Fixed Frame` 은 `world` 다.
+Isaac에서 RealSense 드라이버가 없다면 `publish_optical_tf=true`로
+`camera_link → camera_color_optical_frame`만 보완할 수 있다. 이때도
+`world → camera_link`는 Isaac의 실제 카메라 pose 또는 캘리브레이션 값으로
+별도 발행한다. `publish_world_tf=true`는 과거 RViz 편의용 공칭 1m 변환이며,
+경고와 함께만 발행된다. 로봇 좌표 변환에 사용하면 안 된다.
 
 ---
 
@@ -233,3 +251,79 @@ Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' |
 - 크래시가 2026-08-19 에 한 번 났다(depth 텍스처 회수 경합). 원인인 발행 큐를
   제거해서 구조적으로는 해소됐으나 **장시간 검증은 8 분뿐**이다.
 - `/clock` 간격이 가끔 음수로 찍힌다(스탬프 역행). 영향은 확인하지 않았다.
+
+---
+
+## 6. 비전이 내보내는 것 — 소비자 계약 (2026-08-25)
+
+§1~5 는 **비전이 받는 것**의 계약이다. 이 절은 **비전이 내보내는 것** 중
+소비자가 오해하기 쉬운 둘이다.
+
+### 6.1 `/perception/status` — 입력 건강 하트비트 (신규)
+
+`diagnostic_msgs/DiagnosticArray`, **1 Hz**(`perception_node.py` 의
+`_watchdog` → `_publish_status`, `create_timer(1.0, ...)`). 항상 status 하나만
+담는다:
+
+```
+status[0].name        = "roboworld_perception/input"
+status[0].hardware_id = "rgbd_camera"
+```
+
+**레벨 규칙** — `input_health.classify_input_health()` 가 정한다. **위에서부터
+먼저 걸리는 것이 이긴다**:
+
+| 조건 | level | message |
+|---|---|---|
+| 입력 계약 위반이 잡혀 있음 | **ERROR**(2) | `input contract invalid` |
+| `camera_info` 아직 무효(K 없음) | **ERROR**(2) | `waiting for valid camera_info` |
+| 프레임을 **한 번도** 못 받음 | **WARN**(1) | `waiting for RGB-D frames` |
+| 마지막 프레임이 `stale_timeout` 초과 | **WARN**(1) | `RGB-D input stale` |
+| 그 외 | **OK**(0) | `RGB-D input healthy` |
+
+**KeyValue 키 (9개, 항상 이 순서로 전부 실린다)**:
+
+| 키 | 값 |
+|---|---|
+| `camera_info_valid` | `true` / `false` |
+| `input_contract_valid` | `true` / `false` |
+| `last_frame_age_s` | 초, 소수 3자리. 프레임을 한 번도 못 받았으면 **`never`** |
+| `last_processing_duration_ms` | ms, 소수 1자리. 아직 없으면 **`never`** |
+| `out_of_order_frame_drops` | 정수 누적 카운터 |
+| `stale_timeout_s` | 초, 소수 1자리 |
+| `camera_frame` | `camera_info` 가 보고한 광학 프레임 이름 |
+| `camera_image_size` | `"{w}x{h}"`. 아직 모르면 **`unknown`** |
+| `input_error` | 계약 위반 문자열. 정상이면 **빈 문자열** |
+
+> **⚠ 값이 전부 문자열이다.** `last_frame_age_s` / `last_processing_duration_ms`
+> 는 숫자로 파싱하기 전에 **`never` 를 먼저 걸러야 한다.** `camera_image_size`
+> 의 `unknown` 도 같다.
+
+> **⚠ 이건 파이프라인 건강이 아니라 *입력* 건강이다.** `OK` 는 RGB-D 프레임이
+> 최근에 들어왔다는 뜻이지 검출이 나가고 있다는 뜻이 아니다. 발행 여부는
+> `/perception/detections` 로 볼 것.
+
+### 6.2 `Detection3DArray` 의 **회전 covariance 는 sentinel 이다**
+
+`pose.covariance` 는 `x, y, z, roll, pitch, yaw` 순 6×6 이다.
+
+- **위치 대각**(`[0] [7] [14]`) — 필터가 낸 **실제 x/y/z 분산**(m²)
+- **회전 대각**(`[21] [28] [35]`) — **`pi² = 9.8696 rad²` 고정**
+
+> **회전 대각은 측정된 불확실성이 아니라 "미추정" sentinel 이다.**
+> 이 파이프라인은 **위치만** 필터링한다. OBB 쿼터니언은 시각화에는 쓸 만하지만
+> **교정된 의미론적 물체 자세가 아니고 자세 불확실성 모형이 없다.**
+> **9.87 을 실제 측정값으로 읽지 말 것.**
+
+**왜 `pi²` 인가** — 근거 없는 수가 아니라 **보수적** sentinel 이다. 원 위
+균등분포의 실제 분산은 `pi²/3 ≈ 3.29 rad²` 이므로 **9.87 은 그보다도 크다.**
+1σ = 180° 라 자세로 게이팅하는 파지에는 **명시적으로 쓸 수 없게** 만들면서도,
+일반 ROS covariance 소비자에게 **유효한 양의 준정부호 행렬**로 남는다.
+`0.0` 을 쓰면 ROS 소비자에게 **"정확히 확실함"** 을 뜻하므로 안 된다
+(`pose_covariance.py` docstring).
+
+> **⚠ 이건 협상 중인 채널이다.** `open_decisions_2026-09.md` **Q5**
+> (*"로봇 쪽이 `pose.covariance` 를 읽고 판단할 수 있는가"*)가 아직 열려 있고,
+> `docs/README.md` §4 의 **"경계 물체 발행 정책"** 3갈래 중 *"`covariance` 로
+> 알림"* 갈래도 미선택이다. **Q5 답이 이 규약을 바꿀 수 있다** — 소비자 쪽에
+> 파서를 굳히기 전에 Q5 를 먼저 볼 것.
