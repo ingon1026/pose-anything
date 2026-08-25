@@ -8,7 +8,7 @@ SAM3-auto-label → lightweight-YOLO distillation pipeline.
 
 | Bag | Recorded | Scene | Camera | Used for | Distillation value |
 |---|---|---|---|---|---|
-| `test2` | 2026-08-07 | static conveyor, 4+ objects (thermos, laptop, book, smartphone) | 1280×720 top-down | detection quality, size accuracy (±1 cm), prompt tuning (water bottle → thermos) | multi-object variety |
+| `test2` | 2026-08-07 | static conveyor, 4+ objects (thermos, laptop, book, smartphone) | 1280×720 top-down | detection quality, ~~size accuracy (±1 cm)~~ (**2026-08-25 철회, `e3b60f4`** — *"그 bag 에 정답이 없다"*. 실물 줄자 실측이 들어와야 정오를 가른다: `docs/README.md` §4 "측정하면 답이 나오는 것"), prompt tuning (water bottle → thermos) | multi-object variety |
 | `test3` | 2026-08-07 | hand-pushed rollers, 3 moving objects (book, glove, pink block) | 1280×720 top-down | tracking persistence, pose stability, hybrid-tracking validation. NOT usable for constant-velocity work (speed varies 40–137 mm/s) | motion blur / moving scenes |
 | `test4` | 2026-08-11 | static conveyor, 3 objects (black bag, keyboard, book), hand+black folder occlusions | 640×480, closer mount | occlusion signal measurement (score collapse, depth intrusion up to 554 mm), occlusion-handling development, reappearance latency (median 200 ms) | occlusion-hard examples |
 | `test5` | 2026-08-11 | same as test4 + gray notebook (4 objects), 68 s | 640×480 | held-out validation set for occlusion handling (params tuned on test4 only) | occlusion-hard examples, longer sequence |

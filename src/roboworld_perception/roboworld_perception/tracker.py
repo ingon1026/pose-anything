@@ -35,7 +35,12 @@ PSI_AXIS = 1        # 비관통 판정에 쓸 정렬 extent 성분. 하방 카�
 KAPPA_PHYS = 2.71   # 강체 비관통 상한 계수. 원리값 1은 실측에서 죽었다 —
                     # 항등식 입력(추정 extent·중심)이 부정확해 전 씬이 문턱
                     # 1에서 역전된다. 고원 [2.106, 3.500]의 로그 중점.
-                    # **벨트 씬 전용** — enable_merge 기본 꺼짐과 짝이다.
+                    # **벨트 씬 전용.** ~~enable_merge 기본 꺼짐과 짝이다.~~
+                    # **정정(2026-08-25): enable_merge 는 기본 켜짐이다**
+                    # (`5d687bf`; tracker/pipeline/node/launch 넷 다 True).
+                    # 안전 근거는 기본값이 아니라 merge_duplicates 가
+                    # max_per_label == 1 에서 조기 반환하는 것이다 —
+                    # 상세는 IouTracker.__init__ 의 enable_merge 주석.
 TAU_EXT = 0.076     # 장축 log-extent 거부권. 이보다 크게 다르면 크기 주장이
                     # 어긋난 것이라 병합 보류(잘린 트랙이 이겨 파지 폭이
                     # 틀어지는 것을 막는다). 고원 [0.025, 0.232]의 로그 중점.
@@ -111,7 +116,7 @@ class Track:
     frozen: bool = False       # 연속 미검출로 동결 (association 부기 — 게이트 아님)
     plane_constrained: bool = False  # 필터를 시드한 관측 규약 (벨트 평면 구속 여부)
     # 풋프린트 면적의 느린 기준(log m²) — 부분 가림 판정용. 필터의 extent 와
-    # 따로 두는 이유는 pipeline._footprint_truncated 주석 참고.
+    # 따로 두는 이유는 pipeline._footprint_deviation 주석 참고.
     area_ref: float | None = field(default=None, repr=False)
     n_accepted: int = 0        # 수락된 pose 관측 수 (M-of-N 승격용)
     last_accept_t: float | None = None  # 마지막 수락 시각 (신선도)
