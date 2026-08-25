@@ -96,7 +96,36 @@ def masked_depth_median(mask, depth, depth_scale=0.001, box=None,
 
 
 def compute_obb(points, voxel=0.005):
-    """PCA-based oriented bounding box via Open3D. Returns None if degenerate."""
+    """Open3D OBB (무구속 폴백). 퇴화하면 None.
+
+    **점군 PCA 가 아니다** — Open3D 의 `get_oriented_bounding_box` 는
+    Qhull 볼록껍질을 만든 뒤 그 **정점**(2천 점 입력에서 40~53개)에 PCA 한다.
+    이 희소 표본이 면내 yaw 를 못 정하고, yaw 오차 θ 가 지지폭
+    `a·cosθ + b·sinθ` 로 extent 를 부풀린다.
+
+    **지배 변수는 잡음이 아니라 종횡비다** (55x50mm 상면 한 장, seed 20):
+        σ=0      장축 63.3±4.7  단축 60.0±5.8   (참값 55/50)
+        σ=0.02mm      61.1±5.7       57.5±6.6
+        σ=1mm         64.2±5.0       61.0±6.3
+    **잡음 0 에서 이미 만폭으로 흔들린다.** σ 는 두께축만 바꾼다.
+    종횡비별 yaw 표준편차: 1.0 → 30.5° / 1.45 → 5.8° / 3.64 → 1.4°.
+
+    → **근사정사각 물체에서 extent 가 계통적으로 +10~23% 부푼다.** 일방향
+    편향이라 필터가 못 지운다. 실기 test3(상시 무구속)에서 종횡비 관계가
+    5개 런 전부 재현된다 — 책(1.23) sd 9.6/12.9mm, 블록(5.35) sd 1.1°.
+
+    **그래도 지금 고치지 않는다**: (a) 이 경로는 계약상 "잘못된 평면을 쓰느니
+    무구속이 낫다" 의 차악이고 아래 벨트 평면 주석이 이미 열등하다고 선언한다,
+    (b) test3 전 트랙에서 flips=0·축 교체율 0.00% — match_axes+데드밴드+slerp
+    가 20° 급 yaw 흔들림을 흡수해 하류로 안 샌다, (c) 후보 처방 둘이 서로
+    반대 조건에서 깨진다 — 전점 PCA 는 장방형에 최강이나 정사각에서 똑같이
+    퇴화하고, minimal OBB 는 정사각을 살리나 저잡음 장방형(= Isaac 렌더면)에서
+    더 나쁘다. (d) extent 정의가 바뀌면 MAX_THICKNESS·log-extent 필터 R̂·
+    belt_plane A/B 회귀 수치가 전부 재측정 대상이 된다.
+
+    **뒤집을 조건**: 위 +10~23% 과대가 로봇 파지 폭에 쓰이게 되면.
+    voxel_down_sample 은 무죄다 — 꺼도 분산이 안 준다(오히려 미세 증가).
+    """
     if len(points) < 30:
         return None
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
