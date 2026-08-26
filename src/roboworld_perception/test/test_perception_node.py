@@ -7,6 +7,7 @@
 무엇을 부르는가" 를 못 본다 — 그게 2026-08-25 에 실제로 났던 버그다.
 """
 import os
+import re
 import time
 
 import numpy as np
@@ -626,11 +627,36 @@ def test_watchdog_stops_warning_once_frames_arrive(node):
     """첫 프레임이 대기를 끝낸다 — 정상 동작 중에 이 경고가 남으면 안 된다."""
     node.node.on_info(_info())
     node.frame(10.0)
-    assert node.node._input_wait_since is None
     warns = _catch_warns(node)
     node.node._watchdog()
     assert node.errors == []
     assert warns == []
+
+
+def test_watchdog_warns_again_after_a_reset_kills_the_stream(node):
+    """리셋은 대기의 시작이다 — 여기가 이 커밋 이전에 조용히 뚫려 있었다.
+
+    프레임이 오다가 프롬프트가 바뀌고 그 뒤 입력이 죽으면, _reset_input_state
+    가 _last_frame_time 을 None 으로 되돌리므로 stale 분기가 죽는다. 새 분기의
+    기준시각까지 같이 죽으면 두 경로가 동시에 막혀 콘솔이 완전히 침묵한다.
+
+    ⚠ 상태를 손으로 꽂지 않는다. on_prompt 를 실제로 태워야 쓰기 지점 누락을
+    잡을 수 있다 — 꽂아서 재면 그 누락이 가려진 채 초록으로 통과한다.
+    """
+    node.node.on_info(_info())
+    node.frame(10.0)                                  # 정상 수신 -> 대기 종료
+    node.node._input_wait_since -= 3600.0             # 기동한 지 한참 됐다고 치자
+    node.node.on_prompt(String(data="물통"))           # 리셋 = 대기 재시작
+    node.node._input_wait_since -= 10.0               # 그로부터 10초 경과
+    warns = _catch_warns(node)
+    node.node._watchdog()
+    assert node.errors == []
+    assert len(warns) == 1
+    assert "오지 않습니다" in warns[0]
+    # 경과는 리셋 기준이어야 한다. _reset_input_state 가 시계를 다시 감지
+    # 않으면 노드 기동 시각부터 세어 "수백 초째" 같은 틀린 수를 보고한다.
+    assert re.search(r"(\d+)초째", warns[0])
+    assert int(re.search(r"(\d+)초째", warns[0]).group(1)) < 60
 
 
 def test_status_reports_the_active_prompts(node):

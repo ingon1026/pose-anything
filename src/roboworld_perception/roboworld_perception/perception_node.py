@@ -362,6 +362,12 @@ class PerceptionNode(Node):
         self.pipeline.reset()
         self._last_frame_time = None
         self._stale_cleared = True
+        # 이 시계도 여기서 다시 감아야 한다. 프레임이 한 번이라도 왔으면
+        # on_frames 가 None 으로 지워 놨는데, 위 두 줄이 stale 분기를 죽이므로
+        # 재무장하지 않으면 **두 워치독 분기가 동시에 막힌다** — 리셋 뒤에
+        # 입력이 영영 안 와도 콘솔이 완전히 침묵한다. 이 커밋이 고친 냉시동
+        # 침묵이 프롬프트 교체 경로로 그대로 돌아오는 것이다.
+        self._input_wait_since = time.monotonic()
         # The next valid frame repopulates both topics.
         self._withdraw_output()
         self.get_logger().info(f"input contract reset: {reason}")
@@ -395,13 +401,16 @@ class PerceptionNode(Node):
         # 이유까지 붙여 경고한다 — 거기에 "bag 이 재생 중인지 확인하세요" 를
         # 겹쳐 쏘면 재생은 멀쩡한데 틀린 곳을 보게 만든다. camera_info 를 아직
         # 못 받은 경우(K is None)는 아무도 말하지 않으므로 여기가 유일한 표면이다.
-        if (self._input_wait_since is not None
+        # 1항은 _last_frame_time 에서 유도한다. 같은 불리언을 두 변수에 나눠
+        # 담으면 리셋 경로에서 갈라진다 — _input_wait_since 는 "언제부터
+        # 기다렸나" 만 쥐고, "받았나" 는 _last_frame_time 이 쥔다.
+        if (self._last_frame_time is None
                 and self._last_input_contract_error is None and self.prompts
                 and time.monotonic() - self._input_wait_since > self._stale_timeout):
             # camera_info 유무를 함께 싣는다: 없으면 info_topic/bag 자체가,
             # 있으면 color/depth 토픽이나 동기화가 원인이다.
             self.get_logger().warn(
-                "RGB-D 프레임을 한 장도 받지 못했습니다 (%.0f초 경과, "
+                "RGB-D 프레임이 %.0f초째 오지 않습니다 ("
                 "camera_info=%s) — bag 이 재생 중인지, color/depth/info 토픽 "
                 "이름이 맞는지 확인하세요"
                 % (time.monotonic() - self._input_wait_since,
@@ -499,7 +508,6 @@ class PerceptionNode(Node):
         # 재시작 외에 회복이 없다 (docs/README.md 의 LATE_DROP_STREAK_MAX 행).
         self._busy = True
         self._last_frame_time = time.monotonic()
-        self._input_wait_since = None
         self._stale_cleared = False
         t0 = time.perf_counter()
         try:

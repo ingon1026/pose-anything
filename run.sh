@@ -161,7 +161,7 @@ else
   BAG_LOG=$(mktemp)
   echo ">> bag 재생 중 (로그: $BAG_LOG)..."
   ros2 bag play "$SOURCE" > "$BAG_LOG" 2>&1
-  BAG_RC=$?   # `if ! ...` 로 감싸면 ! 가 코드를 삼킨다. cleanup() 이 쓰는 rc 와도 이름을 겹치지 않는다
+  BAG_RC=$?   # `if ! ...` 로 감싸면 ! 가 종료코드를 삼킨다
   if [ "$BAG_RC" -ne 0 ]; then
     echo "!! bag 재생 실패 (ros2 bag play 종료코드 $BAG_RC) — CSV 는 비어 있습니다: $CSV"
     echo "   흔한 원인: mcap 스토리지 플러그인 부재(sudo apt install ros-jazzy-rosbag2-storage-mcap),"

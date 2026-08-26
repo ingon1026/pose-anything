@@ -139,17 +139,16 @@ _PRESET = [
     # 5배 악화시켰다. 발행만 막아서는 안 되는 이유가 이것이다 — 중복 트랙이
     # 매칭 층에서 계속 검출을 뺏어간다.
     #
-    # ~~base 기본값이 false 인 이유~~ **정정(2026-08-26): base 기본값도
-    # true 다** (5d687bf 가 값만 뒤집고 이 주석을 안 따라왔다. tracker.py:38
-    # 은 2026-08-25 에 정정됐는데 여기만 남았다).
+    # `enable_merge` 는 **프리셋에서 뺐다.** base 기본값이 이미 true 라
+    # (perception.launch.py:42) 여기 다시 적으면 무동작이고, 위
+    # publish_score_min 과 같은 이유로 금지된 패턴이다 — base 가 바뀌면
+    # Isaac 만 조용히 옛 값에 남는다. 실제로 그랬다: 5d687bf 가 값을
+    # 뒤집었는데 여기 주석은 "base 기본값이 false" 로 2026-08-26 까지
+    # 남아 있었다.
     #
-    # 살아 있는 근거: 판정 상수 KAPPA_PHYS 가 벨트 씬에서만 보정됐다.
-    # 실기 bag(test2~5)은 라벨이 전부 유일하고 max_per_prompt=1 이라 중복이
-    # 구조적으로 생기지 않아 음성 표본만 기여한다. 다른 씬에 이식하며
-    # max_per_label>1 을 열 때는 KAPPA_PHYS 를 다시 확인할 것 — 진짜
-    # 불변식은 기본값이 아니라 merge_duplicates 가 max_per_label == 1 에서
-    # 조기 반환하는 것이다(tracker.py:311).
-    ("enable_merge", "true"),
+    # 왜 켜도 안전한지(KAPPA_PHYS 가 벨트 씬 전용이라는 것 포함)와 다른
+    # 씬에 이식할 때 무엇을 다시 봐야 하는지는 정본에 있다 —
+    # tracker.py:258 의 IouTracker.__init__ enable_merge 주석.
     # 프롬프트 A/B 실측(2026-08-19, 12 종 x 20 초, 재현성 ±0.2 mm)으로 고른 값.
     # 기하는 어휘에 전혀 반응하지 않는다 — 검출된 9 종 모두 우측 3 개의 길이가
     # 152.1/154.9/154.6 mm 로 0.4 mm 이내 동일했다(그 원인은 geometry 의 depth

@@ -217,7 +217,22 @@ colcon build --symlink-install
 ```
 
 The three pinned packages (`torch`, `transformers`, `open3d`) are the ones the
-measured numbers above depend on — the same versions the Dockerfile installs.
+measured numbers above depend on.
+
+> **The container pins more than this list, and you should not simply copy it.**
+> `Dockerfile` also pins `numpy`, `scipy`, `opencv-python`, `pillow`, `rosbags`
+> and `pytest`, because inside the image nothing else needs them. On a host where
+> `apt` manages a ROS-side `numpy`, forcing those same versions shadows it — the
+> exact "value measured under one condition applied to another" trap this repo has
+> been bitten by. Pin them on the host only if you are reproducing a measurement
+> and know what you are shadowing.
+>
+> Two of those pins were found the hard way on 2026-08-26 and apply to a native
+> install too: `opencv-python` uses a four-part version (`4.13.0.92`; `cv2.__version__`
+> reports the three-part library version and is *not* a valid pin), and `pytest`
+> **9.1.1 cannot start at all in a ROS-sourced shell** — Jazzy's `launch_testing`
+> plugin uses an older hook signature. Use `pytest==9.0.2` if you intend to run the
+> test suite below.
 `torchvision` is pinned only because it has to match `torch`. Moving any of
 them invalidates the measurement conditions; re-run the regression gate below
 before trusting the table again. `realsense2_camera` / `librealsense2` are
