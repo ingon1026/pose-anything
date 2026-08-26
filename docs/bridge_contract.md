@@ -305,8 +305,10 @@ status[0].hardware_id = "rgbd_camera"
 > `/perception/detections` 로 볼 것.
 
 > **⚠ `level` 만 보면 안 되는 구체적인 경우 — 빈 프롬프트.**
-> 프롬프트가 비면 `on_frames` 가 **모든 프레임을 조용히 버린다**
-> (`if self.K is None or self._busy or not self.prompts: return`). 그런데
+> 프롬프트가 비면 `on_frames` 가 **모든 프레임을 버린다** — 콘솔에는
+> throttled warn 이 초당 한 번 뜬다(`1b1e793` 이후. 그 전에는 로그도 에러도
+> 없는 완전 무성이었고, 이 절의 옛 문구 *"조용히 버린다"* 는 그때 것이다).
+> **그런데 원격에서는 여전히 안 보인다** — 그래서 아래 키가 필요하다. 그리고
 > `classify_input_health()` 는 **프롬프트를 인자로 받지도 않아서** `level` 은
 > 카메라 상태만 반영한다. 즉 **`level` 이 `OK` / `WARN` 이어도 검출이 안 나갈 수
 > 있고, 프롬프트가 비었는지는 `prompts` 값으로만 알 수 있다.** 그래서 이 키가
