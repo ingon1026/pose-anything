@@ -1,24 +1,22 @@
 """객체별 점군(/perception/points) 데이터 블록 회귀.
 
 ROS 없이 돈다 — pipeline.cloud_chunk 는 numpy 만 쓴다. 노드 쪽 발행 경로
-(publish_points 게이트·회수)는 rclpy 가 필요해 여기서 안 다룬다.
+(publish_points 게이트·회수)는 rclpy 가 필요해 test_perception_node.py 가 맡는다.
 """
 import numpy as np
-from conftest import K
+from conftest import K, rect_scene
 
 from roboworld_perception.geometry import mask_depth_to_points
+from roboworld_perception.overlay import PALETTE
 from roboworld_perception.pipeline import POINT_DTYPE, cloud_chunk
 
-BLUE, GREEN = (66, 133, 244), (52, 168, 83)  # overlay.PALETTE[0], [1] (BGR)
+# 리터럴로 베끼면 PALETTE 가 바뀌어도 테스트는 옛 색을 계속 단언한다 —
+# "마커와 같은 뒤집기다" 라는 주장이 조용히 검증을 멈춘다.
+BLUE, GREEN = PALETTE[0], PALETTE[1]
 
 
 def make_scene(u0=100, u1=140, v0=80, v1=110, z=1.0):
-    """상면 하나짜리 합성 씬 — uint16 mm depth + 마스크."""
-    depth = np.zeros((240, 320), dtype=np.uint16)
-    mask = np.zeros((240, 320), dtype=bool)
-    depth[v0:v1, u0:u1] = int(z * 1000)
-    mask[v0:v1, u0:u1] = True
-    return mask, depth
+    return rect_scene(int(z * 1000), u0, u1, v0, v1)
 
 
 def test_chunk_is_the_point_set_the_obb_used():
@@ -57,3 +55,18 @@ def test_empty_mask_yields_empty_chunk():
     mask, depth = make_scene()
     chunk = cloud_chunk(np.zeros_like(mask), depth, K, BLUE)
     assert len(chunk) == 0 and chunk.dtype == POINT_DTYPE
+
+
+def test_precomputed_points_give_the_same_chunk():
+    """points 를 넘긴 것과 안 넘긴 것이 바이트까지 같아야 한다.
+
+    노드는 _update_geometry 가 이미 만든 배열을 넘겨 재계산을 피한다
+    (PerceptionPipeline.frame_points). 그 최적화 전체가 이 동치성 위에 서
+    있는데, 노드 테스트의 스텁 검출기로는 트랙이 안 생겨 그 경로가 안 돈다.
+    """
+    mask, depth = make_scene()
+    ref = mask_depth_to_points(mask, depth, K, depth_scale=0.001)
+    assert len(ref) > 100                      # 양성 대조
+    a = cloud_chunk(mask, depth, K, BLUE)
+    b = cloud_chunk(None, None, None, BLUE, points=ref)   # 마스크·depth 안 본다
+    assert a.tobytes() == b.tobytes()

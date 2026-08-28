@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from conftest import K
+from roboworld_perception.geometry import mask_depth_to_points
 from roboworld_perception.pipeline import (PerceptionPipeline,
                                            STAMP_RESET_BACKWARD_S,
                                            STAMP_RESET_NEW_RUN_MAX_S,
@@ -299,3 +300,30 @@ def test_clock_return_to_new_run_origin_requires_reset():
     pipe.process(rgb, depth, K, ["obj"], stamp_s=12.0)
 
     assert pipe.time_reset_required(STAMP_RESET_NEW_RUN_MAX_S)
+
+
+def test_frame_points_memo_is_filled_and_matches_the_geometry_input():
+    """노드가 재계산을 피하려고 읽는 메모가 실제로 채워지는지.
+
+    frame_points 는 순수 최적화라 안 채워져도 동작이 안 바뀐다 —
+    cloud_chunk 가 폴백으로 직접 계산한다. 그래서 조용히 멈춰도 아무 테스트도
+    안 깨지고, 점군 발행만 다시 느려진다. 이 테스트가 그 침묵을 막는다.
+    """
+    pipe = _plane_pipe()
+    track = _run(pipe, 945)
+    memo = pipe.frame_points
+    assert track.track_id in memo, "메모가 비었다 — 노드가 매번 재계산하게 된다"
+    depth = np.full((240, 320), 1000, np.uint16)
+    depth[100:160, 100:180] = 945
+    ref = mask_depth_to_points(track.mask, depth, K, depth_scale=pipe.depth_scale)
+    assert np.array_equal(memo[track.track_id], ref)
+
+
+def test_frame_points_memo_does_not_survive_the_frame():
+    """프레임 간 staleness 규약이 새로 생기지 않아야 한다 — process() 가 비운다."""
+    pipe = _plane_pipe()
+    _run(pipe, 945)
+    assert pipe.frame_points
+    pipe.process(np.zeros((240, 320, 3), np.uint8),
+                 np.zeros((240, 320), np.uint16), K, [])
+    assert pipe.frame_points == {}

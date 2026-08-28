@@ -3,26 +3,16 @@
 구조적으로 사라졌는지 검증한다."""
 import numpy as np
 
-from conftest import K
+from conftest import K, rect_scene
 from roboworld_perception.geometry import masked_depth_median
 from roboworld_perception.pipeline import PerceptionPipeline
 from roboworld_perception.tracker import Track
 
 
-def _rect_scene(depth_mm, u0, u1, v0, v1):
-    """직사각 마스크 + 균일 depth 합성 장면 (이 파일의 장면 생성 단일 정의)."""
-    depth = np.zeros((240, 320), np.uint16)
-    mask = np.zeros((240, 320), bool)
-    sl = (slice(v0, v1), slice(u0, u1))
-    mask[sl] = True
-    depth[sl] = depth_mm
-    return mask, depth
-
-
 def make(depth_mm):
     """기본 장면 — 픽셀 고정이라 거리가 변하면 미터 크기가 z² 로 줄어든다.
     그 성질이 문제되는 테스트는 make_rigid 를 쓴다."""
-    return _rect_scene(depth_mm, 100, 180, 100, 160)
+    return rect_scene(depth_mm, 100, 180, 100, 160)
 
 
 class NoDetector:
@@ -110,7 +100,7 @@ def make_rigid(depth_mm, w_m=0.2667, h_m=0.2):
     hw = int(round(w_m / 2 * K[0, 0] / z))
     hh = int(round(h_m / 2 * K[1, 1] / z))
     cu, cv = int(K[0, 2] - 20), int(K[1, 2] + 10)
-    return _rect_scene(depth_mm, max(0, cu - hw), cu + hw,
+    return rect_scene(depth_mm, max(0, cu - hw), cu + hw,
                        max(0, cv - hh), cv + hh)
 
 
@@ -188,7 +178,7 @@ def test_thick_object_top_surface_is_not_intrusion():
 def make_partial(depth_mm, cover_px):
     """가리개가 마스크의 왼쪽 cover_px 만큼을 덮은 관측 — 보이는 영역이 줄고
     그 중심이 오른쪽으로 밀린다. 부분 가림의 최소 재현."""
-    return _rect_scene(depth_mm, 100 + cover_px, 180, 100, 160)
+    return rect_scene(depth_mm, 100 + cover_px, 180, 100, 160)
 
 
 def test_partial_occlusion_does_not_move_state():
