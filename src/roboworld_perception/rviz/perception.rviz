@@ -45,11 +45,13 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /perception/markers
       Value: true
-    # 객체별 점군. 노드 쪽 publish_points 가 기본 꺼짐이라 켜기 전엔 빈
-    # 디스플레이다 — 여기 없으면 켜도 손으로 추가해야 보인다.
+    # 객체별 점군. **기본 꺼짐이고, MarkerArray 와 같이 보라고 넣은 게 아니다** —
+    # 상자와 점을 겹쳐 놓으면 둘 다 안 읽힌다. 기본 화면은 예전 그대로 MarkerArray 고,
+    # 점군을 보고 싶으면 이 체크박스를 켜고 MarkerArray 를 끄는 식으로 갈아탄다.
+    # 여기 항목이 없으면 토픽을 켜도 RViz 에서 손으로 추가해야 보이므로 항목만 둔다.
     # Color Transformer 는 RGB8 이어야 track_id 색이 나온다(기본값은 Intensity).
     - Class: rviz_default_plugins/PointCloud2
-      Enabled: true
+      Enabled: false
       Name: PointCloud2
       Alpha: 1
       Autocompute Intensity Bounds: true
