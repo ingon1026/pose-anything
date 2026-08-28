@@ -41,8 +41,12 @@ def generate_launch_description():
         DeclareLaunchArgument("publish_score_min", default_value="0.0"),
         DeclareLaunchArgument("enable_merge", default_value="true"),
         # 객체별 점군(/perception/points) — 관측 도구지 상시 기능이 아니다.
-        # 640x480 물체 3개에서 프레임당 수백 KB 이고, publishable 트랙마다
-        # mask_depth_to_points 를 한 번 더 부른다(+15~30ms). 기본 꺼짐.
+        # 대역폭은 물체 크기에 비례한다: 마스크 화소당 약 8 바이트라 Isaac
+        # 블록(592화소)은 4.6 KB/객체, 640x480 책·키보드급(7,310화소)은
+        # 55.8 KB/객체다 — 단일 수치로 인용하지 말 것(docs/bridge_contract.md §6.3).
+        # 여기 적혀 있던 "mask_depth_to_points 를 한 번 더 부른다(+15~30ms)" 는
+        # a631ec0 이 그 중복을 없앤 뒤라 **이제 기전 자체가 없다**. 남는 비용은
+        # 팩·직렬화이고 재측정은 안 했다. 기본 꺼짐.
         DeclareLaunchArgument("publish_points", default_value="false"),
         # 아래 둘은 2026-08-21 도입, 실측 근거는 docs/belt_plane_2026-08-21.md
         # 와 docs/footprint_gate_2026-08-21.md. 둘 다 기본 켜짐이고, 끄면
