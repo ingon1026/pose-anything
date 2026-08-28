@@ -1,8 +1,9 @@
 """ROS 2 node: text-prompted detection + 3D OBB pose on RGB-D stream.
 
 Subscribes color + aligned depth (+ camera_info), publishes Detection3DArray,
-RViz markers and a debug overlay image. Runtime prompt switch via
-/perception/prompt (std_msgs/String, comma-separated names).
+RViz markers, a debug overlay image and (optionally) per-object point
+clouds. Runtime prompt switch via /perception/prompt (std_msgs/String,
+comma-separated names).
 """
 import csv
 import time
@@ -15,7 +16,7 @@ from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import ColorRGBA, String
 from vision_msgs.msg import (Detection3D, Detection3DArray,
                              ObjectHypothesisWithPose)
@@ -25,8 +26,9 @@ import cv2
 
 from .overlay import PALETTE, draw_objects, draw_status, show_window
 from .input_health import classify_input_health
-from .pipeline import (CSV_HEADER, PerceptionPipeline, csv_row, img_to_np,
-                       parse_plane, status_text)
+from .pipeline import (CSV_HEADER, POINT_DTYPE, PerceptionPipeline,
+                       cloud_chunk, csv_row, img_to_np, parse_plane,
+                       status_text)
 from .pose_covariance import published_pose_covariance
 from .sam3_detector import PROMPT_ALIASES, Sam3Detector, parse_prompts
 
@@ -40,6 +42,21 @@ def np_to_imgmsg(bgr: np.ndarray) -> Image:
     msg.encoding = "bgr8"
     msg.step = msg.width * 3
     msg.data = np.ascontiguousarray(bgr).tobytes()
+    return msg
+
+
+def np_to_cloudmsg(records: np.ndarray) -> PointCloud2:
+    """POINT_DTYPE 레코드 배열 -> PointCloud2 (조밀·비정형 1xN)."""
+    msg = PointCloud2()
+    msg.height, msg.width = 1, len(records)
+    msg.is_bigendian = False
+    msg.is_dense = True  # mask_depth_to_points 의 z_range 가 0/NaN 을 이미 뺐다
+    msg.point_step = POINT_DTYPE.itemsize
+    msg.row_step = msg.point_step * msg.width
+    msg.fields = [PointField(name=n, offset=POINT_DTYPE.fields[n][1],
+                             datatype=PointField.FLOAT32, count=1)
+                  for n in POINT_DTYPE.names]
+    msg.data = records.tobytes()
     return msg
 
 
@@ -109,6 +126,10 @@ class PerceptionNode(Node):
         self.declare_parameter("max_per_prompt", 1)
         self.declare_parameter("detect_interval", 5)
         self.declare_parameter("display", False)  # 전체 크기 디버그 창 표시
+        # 객체별 점군(/perception/points). 관측 도구지 상시 기능이 아니다 —
+        # 프레임당 수백 KB 라 기본 꺼짐. 발행 대상은 Detection3DArray 와
+        # 같은 publishable 게이트다(publish() 의 같은 루프에서 만든다).
+        self.declare_parameter("publish_points", False)
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic",
                                "/camera/camera/aligned_depth_to_color/image_raw")
@@ -267,6 +288,9 @@ class PerceptionNode(Node):
                                              "/perception/detections", 10)
         self.pub_markers = self.create_publisher(MarkerArray,
                                                  "/perception/markers", 10)
+        self.pub_points = self.create_publisher(
+            PointCloud2, "/perception/points", 10) \
+            if self.get_parameter("publish_points").value else None
         self.pub_debug = self.create_publisher(Image, "/perception/debug_image", 10)
         self.pub_status = self.create_publisher(DiagnosticArray,
                                                 "/perception/status", 10)
@@ -340,13 +364,13 @@ class PerceptionNode(Node):
                 f"frame={self.frame_id}")
 
     def _withdraw_output(self):
-        """Retract both output topics so no consumer keeps the last detection.
+        """Retract every output topic so no consumer keeps the last detection.
 
         A withdrawal must be visible to consumers immediately; otherwise a
         robot can keep acting on the last detection while this node has
         nothing valid to say.  Clearing the markers alone only tidies up what
         a person watches in RViz - /perception/detections is what a robot
-        reads, so the two always go out together.
+        reads, so they always go out together.
         """
         empty = Detection3DArray()
         empty.header.stamp = self.get_clock().now().to_msg()
@@ -356,6 +380,12 @@ class PerceptionNode(Node):
         markers.markers.append(Marker(action=Marker.DELETEALL))
         self.pub_markers.publish(markers)
         self._prev_marker_ids = set()
+        if self.pub_points is not None:
+            # 빈 점군이 곧 회수다 — 안 보내면 리셋 뒤에도 RViz 에 옛 점군이
+            # 남아 검출 토픽과 다른 것을 보여준다.
+            cloud = np_to_cloudmsg(np.empty(0, POINT_DTYPE))
+            cloud.header = empty.header
+            self.pub_points.publish(cloud)
 
     def _reset_input_state(self, reason):
         """Forget observations and explicitly withdraw output after a reset."""
@@ -520,7 +550,7 @@ class PerceptionNode(Node):
             objects = self.pipeline.process(rgb, depth, self.K, self.prompts,
                                             stamp_s)
             proc_ms = (time.perf_counter() - t0) * 1000
-            self.publish(objects, color_msg.header.stamp, bgr, proc_ms)
+            self.publish(objects, color_msg.header.stamp, bgr, proc_ms, depth)
         except Exception as e:  # keep the node alive on a bad frame
             self.get_logger().error(f"frame failed: {e}")
         finally:
@@ -532,7 +562,7 @@ class PerceptionNode(Node):
             # at at most 1 Hz.
             self._publish_status()
 
-    def publish(self, objects, stamp, bgr, proc_ms):
+    def publish(self, objects, stamp, bgr, proc_ms, depth):
         det_array = Detection3DArray()
         det_array.header.stamp = stamp
         det_array.header.frame_id = self.frame_id
@@ -541,6 +571,7 @@ class PerceptionNode(Node):
         # 알아서 덮어쓰므로, 지움 없이 갱신하면 깜빡이지 않는다.
         # 사라진 것만 아래에서 골라 DELETE 한다.
         cur_marker_ids = set()
+        chunks = []
 
         stamp_s = stamp.sec + stamp.nanosec * 1e-9
         for obj in objects:
@@ -578,6 +609,12 @@ class PerceptionNode(Node):
             cube.color.b, cube.color.g, cube.color.r = [c / 255 for c in color]
             cube.color.a = 0.4
             markers.markers.append(cube)
+
+            if self.pub_points is not None:
+                # 상자와 같은 루프·같은 게이트·같은 색이다. 점군을 따로 돌면
+                # 두 토픽이 다른 물체를 보여줄 수 있다.
+                chunks.append(cloud_chunk(obj.mask, depth, self.K, color,
+                                          self.pipeline.depth_scale))
 
             axes = Marker()
             axes.header = det_array.header
@@ -622,6 +659,12 @@ class PerceptionNode(Node):
 
         self.pub_det.publish(det_array)
         self.pub_markers.publish(markers)
+        if self.pub_points is not None:
+            # 발행할 것이 없어도 보낸다 — 빈 점군이 "지금은 아무것도 없다" 다.
+            cloud = np_to_cloudmsg(np.concatenate(chunks) if chunks
+                                   else np.empty(0, POINT_DTYPE))
+            cloud.header = det_array.header
+            self.pub_points.publish(cloud)
 
         inst_fps = 1000.0 / max(proc_ms, 1e-3)
         self._fps_ema = inst_fps if self._fps_ema == 0 else \

@@ -50,6 +50,31 @@ def csv_row(obj, stamp_s, proc_ms):
             f"{r:.2f}", f"{p:.2f}", f"{y:.2f}", obj.flip_count, f"{proc_ms:.1f}"]
 
 
+POINT_DTYPE = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                        ("rgb", "<f4")])
+
+
+def cloud_chunk(mask, depth, K, color, depth_scale=0.001):
+    """한 트랙의 점군 — PointCloud2 데이터 블록(x,y,z,rgb) 그대로.
+
+    **추출 규약은 _update_geometry 와 같아야 한다** — 한 글자도 다르지 않게
+    mask_depth_to_points 를 기본 인자로 부른다. 여기서 stride·erode 를 따로
+    정하면 상자와 점군이 다른 것을 보여주는 디버깅 도구가 된다.
+    다만 **점군과 상자가 겹치지는 않는다**: 상자의 center·extent 는 필터
+    상태에서 오고(Track.update_obb) 이 프레임 관측은 게이트에 기각됐을 수도
+    있다. 이 점군은 그 뒤에 있는 **이번 프레임 원관측**이다 — 어긋남이
+    보이는 것이 이 토픽의 목적이다.
+    color 는 PALETTE 항목(cv2 BGR)이라 팩할 때 순서를 뒤집는다 — 마커가
+    같은 뒤집기를 하므로 두 표면의 색이 구성상 같아진다.
+    """
+    pts = mask_depth_to_points(mask, depth, K, depth_scale=depth_scale)
+    rec = np.empty(len(pts), POINT_DTYPE)
+    rec["x"], rec["y"], rec["z"] = pts.T  # 빈 점군이면 (3, 0) 이라 그대로 통과
+    b, g, r = color
+    rec["rgb"] = np.uint32((r << 16) | (g << 8) | b).view(np.float32)
+    return rec
+
+
 def parse_plane(text):
     """"a,b,c,d" (n·p+d=0) → (n, d), |n|=1. 빈 문자열이면 None(자동 추정).
 

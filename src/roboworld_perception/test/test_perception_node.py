@@ -669,3 +669,48 @@ def test_status_reports_the_active_prompts(node):
 
     node.node.on_prompt(String(data=" , "))
     assert _values(node.latest_status())["prompts"] == ""
+
+
+# --- 점군도 회수 계약에 함께 실린다 --------------------------------------
+
+def test_withdraw_also_retracts_point_cloud(node):
+    """네 번째 출력 토픽이 회수에서 빠지면 RViz 에 옛 점군이 남는다.
+
+    회수는 "소비자가 붙잡은 것을 전부 놓게 하는 것" 이라 토픽 하나가 빠지면
+    계약이 아니라 정리 작업이 된다 — 2026-08-25 에 watchdog·on_prompt 두
+    경로가 정확히 그렇게 빠져 있었다.
+
+    여기서 보는 것은 **계약**이다: 회수가 점군 토픽에도 나가는가, 검출과
+    같은 stamp 인가, 메시지가 제대로 생겼는가. **점이 실제로 나오는지는
+    여기서 못 본다** — 이 파일의 스텁 검출기로는 트랙이 생기지 않아 어떤
+    노드 테스트도 비어 있지 않은 detections 를 만들지 못한다. 그 양성 대조는
+    test_point_cloud.py 가 합성 마스크로 따로 세운다(점 100개 초과 단언).
+    publish_points 는 기본 꺼짐이라 여기서 직접 켠다.
+    """
+    node.node.pub_points = node.node.create_publisher(
+        pn.PointCloud2, "/perception/points", 10)
+    clouds = []
+    node.node.pub_points.publish = clouds.append
+
+    node.node.on_info(_info())
+    node.frame(10.0)
+    assert node.errors == []
+    before = len(clouds)
+    assert before == 1                    # 정상 프레임도 매번 발행한다
+
+    node.node.on_prompt(String(data="thermos"))
+    assert len(node.det) == 2 and node.det[-1].detections == []
+    assert len(clouds) == before + 1      # 회수가 점군 토픽에도 나갔다
+    assert clouds[-1].width == 0          # 빈 점군이 곧 회수다
+    assert clouds[-1].point_step == 16    # x,y,z,rgb float32
+    assert clouds[-1].header.stamp == node.det[-1].header.stamp
+
+
+def test_withdraw_is_safe_when_points_are_off(node):
+    """기본값(publish_points=False)에서 회수가 죽지 않는다."""
+    assert node.node.pub_points is None
+    node.node.on_info(_info())
+    node.frame(10.0)
+    node.node.on_prompt(String(data="thermos"))
+    assert node.errors == []
+    assert node.det[-1].detections == []
