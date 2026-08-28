@@ -173,11 +173,42 @@
 **저장소는 냉시동에서 돈다.** 단 **도메인 격리가 전제**다 — 격리 없이 돌리면
 Isaac 브리지와 토픽이 충돌해 출력이 전량 폐기된다(§3-1, §5).
 
-**아직 검증 안 된 것 — 컨테이너 안에서 SAM3 를 띄워 본 적이 없다.**
+**격리는 저장소 어디에도 안 걸려 있다 — 매 셸에서 손으로 걸어야 한다.**
+`run.sh:45` → `scripts/ros_env.sh:28-29` 는 전송 변수 둘만 export 하고,
+`perception.launch.py:20,24` · `docker-compose.yml:15-22` 도 같은 둘뿐이다.
+저장소 안의 유일한 `ROS_DOMAIN_ID` 사용처는 `test/test_perception_node.py:18`
+(테스트 격리용) 하나다.
+
+| | |
+|---|---|
+| **언제 충돌하나** | Isaac Sim ROS 2 브리지가 떠 있는 채로 bag 재생·라이브 실행을 할 때. 노드가 구독하는 이름이 `/camera/camera/color/image_raw` · `/camera/camera/color/camera_info` · `/camera/camera/aligned_depth_to_color/image_raw` 로 (`perception_node.py:112-115`) 브리지가 쏘는 이름과 **같다** |
+| **어떻게 격리하나** | `ROS_DOMAIN_ID=77 ./run.sh bags/test4` — 노드(`run.sh:117`) · bag player(`:180`) · rviz2(`:157`) · RealSense launch(`:79`) 가 전부 이 셸의 자식이라 export 가 그대로 상속된다. `77` 은 실행으로 검증된 값이다(§3-1, §5) |
+| **격리됐는지 확인** | **격리한 바로 그 셸에서** `ros2 topic info -v /camera/camera/color/camera_info` → Publisher count 가 의도한 발행자 수(bag 재생만이면 1)인가. ⚠ **다른 셸에서 치면 그 셸의 도메인을 세고 "깨끗하다" 고 나온다** — 확인 절차 자체가 무성 실패한다 |
+| **잊으면 보이는 것** | CSV 가 **헤더 1줄**. 로그에 `camera_info changed (size, intrinsics, or frame); tracker reset` 반복. **에러도 크래시도 없다** — 노드는 살아서 매 프레임 리셋만 한다(§3-1, §5) |
+
+⚠ **호스트에서 건 격리는 컨테이너에 안 간다.** `docker-compose.yml` 의
+`environment`(`:15-22`)에 `ROS_DOMAIN_ID` 가 없다. `network_mode: host`(`:10`)
+로 호스트 DDS 에 그대로 붙는데 도메인 값만 전달되지 않으므로, **호스트 셸을
+격리해도 `docker compose run` 은 격리 안 된 도메인에 붙는다.** `.bashrc` 가
+컨테이너에 없어서 났던 사고(`scripts/ros_env.sh:4-12`)와 같은 부류다.
+**컨테이너 경로에서 격리를 걸어본 적은 아직 없다 — 미확인.**
+
+~~**아직 검증 안 된 것 — 컨테이너 안에서 SAM3 를 띄워 본 적이 없다.**
 **빌드 성공은 `SAM3 ready` 가 아니다.** Hub 이미지는 13일 전 것이라 오늘 커밋이
-하나도 안 들어 있다. 컨테이너 경로를 신뢰하려면 **컨테이너 안에서 모델을 올려
-검출이 나가는 것까지** 봐야 한다(§3-1 의 VRAM 건이 같은 부류다 — *"로드만 되고
-추론을 한 번도 안 한 상태"* 를 값으로 보고했다).
+하나도 안 들어 있다.~~
+
+> **갱신 (2026-08-26).** 앞의 두 문장은 더 이상 사실이 아니다. `1.2.0` 을 빌드해
+> **컨테이너 안에서 `SAM3 ready` 4.1초**, `pytest` **161 passed**(로컬과 동일),
+> `torch.cuda.is_available()` **True**(RTX 4070 Ti) 를 확인했고 Hub 에
+> `ingon1026/pose-anything:1.2.0`(=`latest`) 로 올렸다. Hub 이미지에 오늘 커밋이
+> 들어 있다.
+>
+> **다만 원문의 요구는 절반만 채워졌다** — 검증한 것은 **모델 로드까지**이고,
+> **컨테이너 안에서 bag 을 돌려 검출이 실제로 나가는 것은 아직 안 봤다.**
+> §3-1 의 VRAM 건이 같은 부류다 — *"로드만 되고 추론을 한 번도 안 한 상태"* 를
+> 값으로 보고했다. 컨테이너 경로를 끝까지 신뢰하려면 **검출이 나가는 것까지**
+> 봐야 하고, 그때 **도메인 격리도 같이 걸어야 한다**(바로 위 항목 — 컨테이너
+> 경로의 격리는 미확인).
 
 ### 별건으로 남긴 것
 | 항목 | 상태 | 출처 |
