@@ -485,8 +485,7 @@ WSL 기본 `rmem_max` 는 **212992 (208 KB)** 다. `sockets_size=1MB` 를 주면
 확인 방법:
 
 ```bash
-tr ' ' '
-' < /proc/$(pgrep -f perception_node)/environ | grep FASTDDS
+tr '\0' '\n' < /proc/$(pgrep -f perception_node)/environ | grep FASTDDS
 ```
 
 비어 있으면 그 프로세스는 UDP 를 쓰고 있다. launch 파일이나 기동 스크립트에
