@@ -69,14 +69,23 @@ if [ "$SOURCE" = "live" ]; then
   if ros2 topic list 2>/dev/null | grep -q "^/camera/camera/color/image_raw$"; then
     echo ">> 이미 실행 중인 카메라 노드를 사용합니다 (중복 실행 방지)"
   else
-    # 아래 launch 는 출력을 버리므로 패키지가 없으면 조용히 안 뜬다 — 미리 확인한다
+    # 아래 launch 는 패키지가 없으면 곧바로 죽는다 — 미리 확인한다
     if ! ros2 pkg prefix realsense2_camera > /dev/null 2>&1; then
       echo "!! realsense2_camera 패키지가 없습니다 — 카메라 노드가 뜨지 않습니다."
       echo "   sudo apt install ros-jazzy-realsense2-camera"
     fi
-    echo ">> RealSense 카메라 시작..."
-    setsid ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > /dev/null 2>&1 &
-    PIDS+=($!)
+    CAM_LOG=$(mktemp)
+    echo ">> RealSense 카메라 시작... (로그: $CAM_LOG)"
+    setsid ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true > "$CAM_LOG" 2>&1 &
+    CAM_PID=$!
+    PIDS+=($CAM_PID)
+    sleep 2
+    if ! kill -0 $CAM_PID 2>/dev/null; then
+      echo "!! RealSense 카메라 기동 실패 — 영상이 들어오지 않아 검출이 진행되지 않습니다."
+      echo "   흔한 원인: realsense2_camera 패키지 부재, USB 연결·권한, 다른 프로세스가 카메라 점유."
+      tail -20 "$CAM_LOG"
+      exit 1
+    fi
   fi
 fi
 
@@ -144,8 +153,16 @@ else
     echo "!! rviz2 가 없습니다 — 3D 마커 창은 뜨지 않습니다 (ros-base 설치에는 없다)."
     echo "   sudo apt install ros-jazzy-rviz2   ·  또는 --headless 로 실행"
   fi
-  setsid rviz2 -d src/roboworld_perception/rviz/perception.rviz > /dev/null 2>&1 &
-  PIDS+=($!)
+  RVIZ_LOG=$(mktemp)
+  setsid rviz2 -d src/roboworld_perception/rviz/perception.rviz > "$RVIZ_LOG" 2>&1 &
+  RVIZ_PID=$!
+  PIDS+=($RVIZ_PID)
+  sleep 2
+  if ! kill -0 $RVIZ_PID 2>/dev/null; then
+    # 위 `command -v` 를 통과하고도 죽는 경우 — WSL 에서 DISPLAY 가 없을 때가 흔하다
+    echo "!! rviz2 가 떴다가 죽었습니다 — 3D 마커 창만 없고 인식은 계속됩니다 (로그: $RVIZ_LOG)."
+    tail -20 "$RVIZ_LOG"
+  fi
   echo ">> 준비 완료 — 디버그 창(전체 크기) + RViz 3D 박스(MarkerArray)"
 fi
 
