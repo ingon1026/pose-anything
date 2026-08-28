@@ -40,6 +40,10 @@ def generate_launch_description():
         DeclareLaunchArgument("sync_queue_size", default_value="1"),
         DeclareLaunchArgument("publish_score_min", default_value="0.0"),
         DeclareLaunchArgument("enable_merge", default_value="true"),
+        # 객체별 점군(/perception/points) — 관측 도구지 상시 기능이 아니다.
+        # 640x480 물체 3개에서 프레임당 수백 KB 이고, publishable 트랙마다
+        # mask_depth_to_points 를 한 번 더 부른다(+15~30ms). 기본 꺼짐.
+        DeclareLaunchArgument("publish_points", default_value="false"),
         # 아래 둘은 2026-08-21 도입, 실측 근거는 docs/belt_plane_2026-08-21.md
         # 와 docs/footprint_gate_2026-08-21.md. 둘 다 기본 켜짐이고, 끄면
         # 그날 이전 동작으로 돌아간다.
@@ -97,6 +101,8 @@ def generate_launch_description():
                     LaunchConfiguration("publish_score_min"), value_type=float),
                 "enable_merge": ParameterValue(
                     LaunchConfiguration("enable_merge"), value_type=bool),
+                "publish_points": ParameterValue(
+                    LaunchConfiguration("publish_points"), value_type=bool),
                 "use_belt_plane": ParameterValue(
                     LaunchConfiguration("use_belt_plane"), value_type=bool),
                 "enable_footprint_gate": ParameterValue(

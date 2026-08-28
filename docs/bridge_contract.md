@@ -257,7 +257,22 @@ Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' |
 ## 6. 비전이 내보내는 것 — 소비자 계약 (2026-08-25)
 
 §1~5 는 **비전이 받는 것**의 계약이다. 이 절은 **비전이 내보내는 것** 중
-소비자가 오해하기 쉬운 둘이다.
+소비자가 오해하기 쉬운 것들이다.
+
+발행 토픽 전부:
+
+| 토픽 | 타입 | 소비자 |
+|---|---|---|
+| `/perception/detections` | `vision_msgs/Detection3DArray` | **로봇이 읽는 것** |
+| `/perception/markers` | `visualization_msgs/MarkerArray` | RViz |
+| `/perception/debug_image` | `sensor_msgs/Image` | 사람 |
+| `/perception/points` | `sensor_msgs/PointCloud2` | **기본 꺼짐** — §6.3 |
+| `/perception/status` | `diagnostic_msgs/DiagnosticArray` | §6.1 |
+
+**앞 넷은 회수 계약을 함께 진다** — `_withdraw_output()` 이 단일 정의이고,
+리셋·워치독에서 같은 stamp 로 같이 나간다. 하나라도 빠지면 소비자가 옛 것을
+붙잡은 채 남는다(2026-08-25 에 워치독·프롬프트 교체 두 경로가 정확히
+그렇게 빠져 있었다).
 
 ### 6.1 `/perception/status` — 입력 건강 하트비트 (신규)
 
@@ -343,3 +358,31 @@ status[0].hardware_id = "rgbd_camera"
 > `docs/README.md` §4 의 **"경계 물체 발행 정책"** 3갈래 중 *"`covariance` 로
 > 알림"* 갈래도 미선택이다. **Q5 답이 이 규약을 바꿀 수 있다** — 소비자 쪽에
 > 파서를 굳히기 전에 Q5 를 먼저 볼 것.
+
+### 6.3 `/perception/points` — 객체별 점군 (2026-08-28, 기본 꺼짐)
+
+`sensor_msgs/PointCloud2`, 조밀·비정형 1×N, `point_step` **16**
+(x·y·z·rgb 전부 float32). `frame_id` 는 다른 출력과 같은 카메라 광학 프레임.
+
+**켜는 법** — `publish_points:=true`. 꺼져 있으면 발행자를 아예 안 만든다.
+
+- **발행 게이트가 `/perception/detections` 와 문자 그대로 같다** — 같은 루프,
+  `publishable` 기각 뒤에서 만든다. 두 토픽은 항상 같은 물체를 말한다.
+- **색은 `track_id` 로 결정**되어 프레임 간 안정이고, 마커·디버그 영상과
+  구성상 같은 색이다.
+- **발행할 것이 없어도 `width=0` 으로 보낸다** — 빈 점군이 "지금은 아무것도
+  없다" 다. 안 보내면 검출은 비었는데 RViz 엔 옛 점군이 남는다.
+
+⚠ **점군과 상자는 같은 물체지만 같은 기하가 아니다.** 상자의 center·extent 는
+**필터 상태**에서 오고(`Track.update_obb`), 이번 프레임 관측은 χ²·풋프린트
+게이트에 기각됐을 수 있다. 점군은 그 뒤에 있는 **이번 프레임 원관측**이다.
+**어긋남이 보이는 것이 이 토픽의 목적이다** — 상자 검증에 쓰지 말 것.
+
+⚠ **대역폭·속도 비용.** 마스크 화소당 약 8 바이트(화소 2개당 점 1개 × 16 B —
+`stride=2` 는 1차원으로 솎으므로 감축이 1/4 이 아니라 1/2 다). 640×480 물체
+3개면 **프레임당 수백 KB**. 그리고 publishable 트랙마다
+`mask_depth_to_points` 를 프레임당 **한 번 더** 부른다(≈10ms/트랙, 3개면
+**+15~30ms**). **관측 도구지 상시 기능이 아니다.**
+
+⚠ `rviz/perception.rviz` 에 PointCloud2 디스플레이가 **없다** — 켜도 RViz 에서
+손으로 추가해야 보인다(Color Transformer 를 `RGB8` 로).
