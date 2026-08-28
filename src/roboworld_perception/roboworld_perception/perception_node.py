@@ -5,6 +5,7 @@ RViz markers, a debug overlay image and (optionally) per-object point
 clouds. Runtime prompt switch via /perception/prompt (std_msgs/String,
 comma-separated names).
 """
+import array
 import csv
 import time
 
@@ -45,18 +46,33 @@ def np_to_imgmsg(bgr: np.ndarray) -> Image:
     return msg
 
 
-def np_to_cloudmsg(records: np.ndarray) -> PointCloud2:
-    """POINT_DTYPE 레코드 배열 -> PointCloud2 (조밀·비정형 1xN)."""
+# POINT_DTYPE 에서만 오는 상수 — 프레임마다 다시 만들 이유가 없다.
+_POINT_FIELDS = [PointField(name=n, offset=POINT_DTYPE.fields[n][1],
+                            datatype=PointField.FLOAT32, count=1)
+                 for n in POINT_DTYPE.names]
+
+
+def np_to_cloudmsg(chunks) -> PointCloud2:
+    """POINT_DTYPE 청크들 -> PointCloud2 (조밀·비정형 1xN).
+
+    청크를 이어붙이는 복사를 안 만든다 — concatenate 로 한 벌, tobytes 로 또
+    한 벌 뜨는 대신 바이트를 목적지 버퍼에 바로 붙인다. cloud_chunk 가 연속
+    float32 로 만들어 주므로 memoryview 캐스트가 안전하다.
+    """
+    buf = array.array("B")
+    width = 0
+    for c in chunks:
+        if len(c):
+            buf.frombytes(memoryview(c).cast("B"))
+            width += len(c)
     msg = PointCloud2()
-    msg.height, msg.width = 1, len(records)
+    msg.height, msg.width = 1, width
     msg.is_bigendian = False
     msg.is_dense = True  # mask_depth_to_points 의 z_range 가 0/NaN 을 이미 뺐다
     msg.point_step = POINT_DTYPE.itemsize
-    msg.row_step = msg.point_step * msg.width
-    msg.fields = [PointField(name=n, offset=POINT_DTYPE.fields[n][1],
-                             datatype=PointField.FLOAT32, count=1)
-                  for n in POINT_DTYPE.names]
-    msg.data = records.tobytes()
+    msg.row_step = msg.point_step * width
+    msg.fields = _POINT_FIELDS
+    msg.data = buf
     return msg
 
 
@@ -363,6 +379,19 @@ class PerceptionNode(Node):
                 f"camera_info received, {signature[0]}x{signature[1]}, "
                 f"frame={self.frame_id}")
 
+    def _publish_points(self, chunks, header):
+        """점군 발행 — 회수 경로와 정상 경로의 **단일 정의**.
+
+        빈 목록이 곧 빈 점군이고 그것이 회수다. 두 경로를 따로 적으면 한쪽만
+        고쳤을 때 회수와 정상 발행이 다른 모양의 메시지를 내는데, 그 갈라짐을
+        잡는 테스트는 회수 쪽에만 있다.
+        """
+        if self.pub_points is None:
+            return
+        cloud = np_to_cloudmsg(chunks)
+        cloud.header = header
+        self.pub_points.publish(cloud)
+
     def _withdraw_output(self):
         """Retract every output topic so no consumer keeps the last detection.
 
@@ -380,12 +409,9 @@ class PerceptionNode(Node):
         markers.markers.append(Marker(action=Marker.DELETEALL))
         self.pub_markers.publish(markers)
         self._prev_marker_ids = set()
-        if self.pub_points is not None:
-            # 빈 점군이 곧 회수다 — 안 보내면 리셋 뒤에도 RViz 에 옛 점군이
-            # 남아 검출 토픽과 다른 것을 보여준다.
-            cloud = np_to_cloudmsg(np.empty(0, POINT_DTYPE))
-            cloud.header = empty.header
-            self.pub_points.publish(cloud)
+        # 빈 점군이 곧 회수다 — 안 보내면 리셋 뒤에도 RViz 에 옛 점군이
+        # 남아 검출 토픽과 다른 것을 보여준다.
+        self._publish_points([], empty.header)
 
     def _reset_input_state(self, reason):
         """Forget observations and explicitly withdraw output after a reset."""
@@ -613,8 +639,12 @@ class PerceptionNode(Node):
             if self.pub_points is not None:
                 # 상자와 같은 루프·같은 게이트·같은 색이다. 점군을 따로 돌면
                 # 두 토픽이 다른 물체를 보여줄 수 있다.
-                chunks.append(cloud_chunk(obj.mask, depth, self.K, color,
-                                          self.pipeline.depth_scale))
+                chunks.append(cloud_chunk(
+                    obj.mask, depth, self.K, color, self.pipeline.depth_scale,
+                    # _update_geometry 가 이번 프레임에 이미 만든 것. 동결·
+                    # 침입 보류처럼 갱신을 안 탄 트랙은 여기 없어 None 이 되고
+                    # cloud_chunk 가 직접 만든다 — 동작은 그대로다.
+                    self.pipeline.frame_points.get(obj.track_id)))
 
             axes = Marker()
             axes.header = det_array.header
@@ -659,12 +689,8 @@ class PerceptionNode(Node):
 
         self.pub_det.publish(det_array)
         self.pub_markers.publish(markers)
-        if self.pub_points is not None:
-            # 발행할 것이 없어도 보낸다 — 빈 점군이 "지금은 아무것도 없다" 다.
-            cloud = np_to_cloudmsg(np.concatenate(chunks) if chunks
-                                   else np.empty(0, POINT_DTYPE))
-            cloud.header = det_array.header
-            self.pub_points.publish(cloud)
+        # 발행할 것이 없어도 보낸다 — 빈 점군이 "지금은 아무것도 없다" 다.
+        self._publish_points(chunks, det_array.header)
 
         inst_fps = 1000.0 / max(proc_ms, 1e-3)
         self._fps_ema = inst_fps if self._fps_ema == 0 else \

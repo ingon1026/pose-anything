@@ -54,7 +54,7 @@ POINT_DTYPE = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
                         ("rgb", "<f4")])
 
 
-def cloud_chunk(mask, depth, K, color, depth_scale=0.001):
+def cloud_chunk(mask, depth, K, color, depth_scale=0.001, points=None):
     """한 트랙의 점군 — PointCloud2 데이터 블록(x,y,z,rgb) 그대로.
 
     **추출 규약은 _update_geometry 와 같아야 한다** — 한 글자도 다르지 않게
@@ -66,13 +66,21 @@ def cloud_chunk(mask, depth, K, color, depth_scale=0.001):
     보이는 것이 이 토픽의 목적이다.
     color 는 PALETTE 항목(cv2 BGR)이라 팩할 때 순서를 뒤집는다 — 마커가
     같은 뒤집기를 하므로 두 표면의 색이 구성상 같아진다.
+
+    points 를 주면 그 배열을 그대로 쓴다 — _update_geometry 가 이미 만든 것을
+    넘기라는 뜻이다(PerceptionPipeline.frame_points). 안 주면 여기서 만든다.
     """
-    pts = mask_depth_to_points(mask, depth, K, depth_scale=depth_scale)
-    rec = np.empty(len(pts), POINT_DTYPE)
-    rec["x"], rec["y"], rec["z"] = pts.T  # 빈 점군이면 (3, 0) 이라 그대로 통과
+    if points is None:
+        points = mask_depth_to_points(mask, depth, K, depth_scale=depth_scale)
+    # 연속 (N,4) float32 로 한 번에 만들고 되본다 — 구조화 dtype 에 축별로
+    # 나눠 쓰면 16바이트 스트라이드 목적지에 캐스트가 3번 걸린다. 그리고
+    # 이렇게 만든 버퍼는 평범한 연속 메모리라 발행부의 memoryview 캐스트가
+    # 무조건 안전하다.
+    out = np.empty((len(points), 4), np.float32)
+    out[:, :3] = points          # 빈 점군이면 (0,3) 이라 그대로 통과
     b, g, r = color
-    rec["rgb"] = np.uint32((r << 16) | (g << 8) | b).view(np.float32)
-    return rec
+    out[:, 3] = np.uint32((r << 16) | (g << 8) | b).view(np.float32)
+    return out.view(POINT_DTYPE).reshape(-1)
 
 
 def parse_plane(text):
@@ -308,6 +316,13 @@ class PerceptionPipeline:
                  enable_footprint_gate=True):
         self.detector = detector
         self.depth_scale = depth_scale
+        # 이번 프레임에 _update_geometry 가 만든 점군 (track_id -> 점 배열).
+        # 노드가 점군 토픽을 만들 때 같은 계산을 한 번 더 하지 않게 하는 메모다
+        # — mask_depth_to_points 는 물체 크기와 무관하게 전프레임 패스를 여러 번
+        # 돈다. process() 진입에서 매번 비우므로 프레임 간 staleness 규약이
+        # 새로 생기지 않는다. 이번 프레임에 갱신 안 된 트랙(동결·침입 보류·
+        # flow 실패)은 여기 없고, 그런 트랙은 호출자가 직접 계산해야 한다.
+        self.frame_points = {}
         self.rot_alpha = rot_alpha
         # "라벨당 트랙 수" 제한은 트래커의 새 트랙 생성에서만 건다
         # (검출 단계에서 자르면 score 역전 시 ID가 끊김)
@@ -395,6 +410,7 @@ class PerceptionPipeline:
         pose를 소비(발행·기록)할지는 Track.publishable로 판정할 것 —
         가림 트랙의 obb는 마지막 정상값(stale)이다.
         """
+        self.frame_points = {}
         if stamp_s is None:
             stamp_s = (self._last_stamp or 0.0) + NOMINAL_DT
         elif self.time_reset_required(stamp_s):
@@ -559,6 +575,7 @@ class PerceptionPipeline:
             return  # 절단 관측으로 시드하지 않음 — 점군·OBB 계산(≈10ms)도 생략
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
+        self.frame_points[track.track_id] = points
         # 벨트 평면 구속이 성립하면 그쪽이 진짜 두께·중심을 준다. 기울어
         # 놓인 물체에서는 obb_on_plane 이 None 을 내고 무구속으로 폴백한다.
         obb = (obb_on_plane(points, self.belt_plane)
