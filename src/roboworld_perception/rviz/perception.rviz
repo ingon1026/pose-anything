@@ -45,6 +45,33 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /perception/markers
       Value: true
+    # 객체별 점군. 노드 쪽 publish_points 가 기본 꺼짐이라 켜기 전엔 빈
+    # 디스플레이다 — 여기 없으면 켜도 손으로 추가해야 보인다.
+    # Color Transformer 는 RGB8 이어야 track_id 색이 나온다(기본값은 Intensity).
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Name: PointCloud2
+      Alpha: 1
+      Autocompute Intensity Bounds: true
+      Axis: Z
+      Channel Name: intensity
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.002
+      Style: Points
+      Use Fixed Frame: true
+      Use rainbow: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/points
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 38; 40; 46

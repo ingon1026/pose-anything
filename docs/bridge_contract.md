@@ -384,5 +384,6 @@ status[0].hardware_id = "rgbd_camera"
 `mask_depth_to_points` 를 프레임당 **한 번 더** 부른다(≈10ms/트랙, 3개면
 **+15~30ms**). **관측 도구지 상시 기능이 아니다.**
 
-⚠ `rviz/perception.rviz` 에 PointCloud2 디스플레이가 **없다** — 켜도 RViz 에서
-손으로 추가해야 보인다(Color Transformer 를 `RGB8` 로).
+`rviz/perception.rviz` 에 PointCloud2 디스플레이를 넣어 뒀다(2026-08-28).
+`publish_points` 가 꺼져 있으면 빈 디스플레이일 뿐이다. **Color Transformer 는
+`RGB8` 로 고정해 뒀다** — RViz 기본값(Intensity)이면 `track_id` 색이 안 나온다.
