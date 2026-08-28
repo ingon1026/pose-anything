@@ -35,7 +35,8 @@ reappears — same track IDs throughout.</sub>
 <sub>**Moving conveyor, three text prompts** (`블록`/block, `책`/book, `장갑`/glove) — each object keeps
 a single track ID for the entire 20-second sequence with zero axis flips. Estimated OBB sizes
 are self-consistent across frames; absolute size is validated only on the Isaac
-scene, where the USD model gives ground truth (docs/image_size_2026-08-21.md).</sub>
+scene, where the USD model gives ground truth
+(docs/isaac_sim_connection_2026-08-13.md).</sub>
 
 ## How it works
 
@@ -85,7 +86,7 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 | Metric | Result |
 |---|---|
 | Track ID persistence (3 moving objects, 20 s) | single ID each, 0 axis flips |
-| OBB size — Isaac scene (USD model 200x55x55 mm) | footprint −4 to −8 mm; thickness **+1.97 mm** vs. the 54.5 mm visible height above the belt (the block sits 0.5 mm into it), measured on the `dist_thresh` **3 mm** branch — 500 frames, `image_size` 1008 (`47ad9cb`). The same branch at 6 mm measured **+3.2 mm** on this scene; test2/test4 fall back to 6 mm, but have no ground truth of their own, so their bias is unquantified |
+| OBB size — Isaac scene (USD model 200x55x55 mm) | footprint −4 to −8 mm; thickness **+1.97 mm** vs. the 54.5 mm visible height above the belt (the block sits 0.5 mm into it), measured on the `dist_thresh` **3 mm** branch — 500 frames, `image_size` 1008 (`47ad9cb`). The 6 mm fallback measured **+3.2 mm** on this same scene; test2/test4 fall back to 6 mm, but have no ground truth of their own, so their bias is unquantified |
 | OBB size vs. real objects (test2/test3) | **not validated** — no measured ground truth for those bags yet |
 | Center jitter (static objects) | ≤ 1.5 mm std *(within a run; the support plane is fitted once and cached, so plane error does not appear in this figure — run-to-run plane spread is 0.40 mm on the Isaac scene and 13 mm on test2)* |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
@@ -124,13 +125,14 @@ a pinned dependency version — an old reference silently blesses the old behavi
 
 ## Requirements
 
-**With Docker** the host only needs an NVIDIA driver, Docker + nvidia-container-toolkit,
+**With Docker** the host only needs an NVIDIA driver, Docker +
+[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html),
 and a Hugging Face account — everything below ships inside the image. For native installs:
 
 - Ubuntu 24.04 (verified on WSL2) with **ROS 2 Jazzy**
 - NVIDIA GPU with ≥ 6 GB VRAM, PyTorch CUDA build (bf16 inference)
-- Python 3.12 — `torch==2.10.0`, `transformers==5.5.0`, `open3d==0.19.0`, `rosbags`, `scipy`, `opencv-python` (the first three are pinned because the
-  measured numbers above are tied to them — see *Native install* below)
+- Python 3.12 — `torch==2.10.0`, `transformers==5.5.0`, `open3d==0.19.0`, `rosbags`,
+  `scipy`, `opencv-python` (the first three are pinned — see *Native install* below)
 - Intel RealSense D455 + [`realsense2_camera`](https://github.com/IntelRealSense/realsense-ros) for live input
 - A Hugging Face account with access to the gated
   [`facebook/sam3`](https://huggingface.co/facebook/sam3) checkpoint
@@ -139,8 +141,6 @@ and a Hugging Face account — everything below ships inside the image. For nati
 ## Quick start
 
 ### Docker (recommended — any Ubuntu PC with an NVIDIA GPU)
-
-Requires Docker and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ```bash
 git clone https://github.com/ingon1026/pose-anything.git
@@ -222,7 +222,11 @@ colcon build --symlink-install
 ```
 
 The three pinned packages (`torch`, `transformers`, `open3d`) are the ones the
-measured numbers above depend on.
+measured numbers above depend on; `torchvision` is pinned only because it has to
+match `torch`. Moving any of them invalidates the measurement conditions —
+re-run the regression gate above before trusting the table again.
+`realsense2_camera` / `librealsense2` are needed only for live camera input;
+`fonts-noto-cjk` only for Korean labels in the debug overlay.
 
 > **The container pins more than this list, and you should not simply copy it.**
 > `Dockerfile` also pins `numpy`, `scipy`, `opencv-python`, `pillow`, `rosbags`
@@ -238,11 +242,6 @@ measured numbers above depend on.
 > **9.1.1 cannot start at all in a ROS-sourced shell** — Jazzy's `launch_testing`
 > plugin uses an older hook signature. Use `pytest==9.0.2` if you intend to run the
 > test suite below.
-`torchvision` is pinned only because it has to match `torch`. Moving any of
-them invalidates the measurement conditions; re-run the regression gate below
-before trusting the table again. `realsense2_camera` / `librealsense2` are
-needed only for live camera input; `fonts-noto-cjk` only for Korean labels in
-the debug overlay.
 
 ```bash
 ./run.sh                           # live RealSense camera
@@ -304,6 +303,8 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 
 **Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
+`score_threshold` (0.4 — a new-track gate, *not* a publish gate; see below),
+`publish_score_min` (0.0 = off — the actual publish gate; see below),
 `publish_points` (false — see below),
 `publish_world_tf` (defaults to the `rviz` launch argument, so runs that open
 RViz enable it; never use this nominal, uncalibrated RViz-only TF as robot
@@ -382,7 +383,8 @@ src/roboworld_perception/         ROS 2 package (ament_python)
     input_health.py               input contract checks, 1 Hz diagnostics
     pose_covariance.py            position covariance for PoseWithCovariance
     perception_node.py            ROS 2 node
-  rviz/perception.rviz            RViz preset
+  launch/                         perception.launch.py (base) · isaac.launch.py (Isaac preset)
+  rviz/perception.rviz            RViz preset (Fixed Frame `world`)
   test/                           pytest, 16 files incl. filter property tests
                                   (`pytest src/roboworld_perception/test -q`;
                                    `scripts/check_ci_env.sh` reproduces CI)
