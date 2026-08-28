@@ -171,9 +171,13 @@ on first run — no local build needed. To build from source instead: `docker co
 > A plain `docker compose run` therefore runs the **Hub image, not your working tree** —
 > silently, with nothing in the output to say so. Use `docker compose run --build --rm perception`.
 > The published image can also simply be **older than this repository** — it is pushed by
-> hand, not by CI. Current: **`1.2.0`** (= `latest`, digest `sha256:826ccd69…`), built and
-> pushed 2026-08-26 from commit `aca9de9`. Verified inside the container: `161 passed`,
-> CUDA visible, and `SAM3 ready` in 4.1 s.
+> hand, not by CI. Current: **`1.3.0`** (= `latest`, digest `sha256:96657bbd72b6…`), built
+> and pushed 2026-08-28 from commit `ada2aa8`. Verified inside the container: `174 passed`
+> (same count as the host), `import yaml` resolves, CUDA visible, and `SAM3 ready` in 9.5 s
+> — that last figure was taken with Isaac Sim rendering on the same GPU, so it is not
+> comparable to the 4.1 s measured standalone on `1.2.0`. Only `src/`, `scripts/`,
+> `run.sh` and the entrypoint go into the image, so documentation-only commits after
+> that one do not make it stale.
 
 > **If Isaac Sim is running, stop it or move to another ROS domain.** Its ROS 2 bridge
 > publishes `/camera/camera/color/camera_info` — the same topic this node subscribes to —
