@@ -392,6 +392,11 @@ status[0].hardware_id = "rgbd_camera"
 **Color Transformer 는 `RGB8` 로 고정해 뒀다** — RViz 기본값(Intensity)이면
 `track_id` 색이 안 나온다.
 
+⚠ **RViz Fixed Frame 은 `world` 여야 하고, 그러려면 `publish_world_tf:=true`
+가 필요하다.** Isaac 프리셋은 켜 둔다(RealSense 드라이버가 없어 아무도
+`world -> camera_link` 를 안 보내기 때문 — `publish_optical_tf` 와 같은 이유).
+bag 재생은 TF 트리가 이미 녹화돼 있어 부모가 둘이 되므로 base 기본값은 false 다.
+
 ⚠ **Fixed Frame 을 `camera_color_optical_frame` 으로 두면 높이가 뒤집혀 보인다.**
 광학 프레임은 **+Z 가 카메라 정면** — 위에서 내려다보는 이 셋업에서는 물리적으로
 **아래**다. RViz 는 +Z 를 화면 위로 그리므로 블록 윗면(z=0.945)이 아래로,

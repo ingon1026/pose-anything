@@ -24,6 +24,11 @@ _PRESET = [
     # RealSense 드라이버가 없어 camera_link -> camera_color_optical_frame 을
     # 아무도 안 채운다. 끄면 RViz 에 마커가 통째로 안 보인다.
     ("publish_optical_tf", "true"),
+    # Isaac 은 RealSense 드라이버가 없어 world->camera_link 도 아무도 안 보낸다.
+    # 그러면 rviz 의 Fixed Frame "world" 가 없는 프레임이 되어 아무것도 안 뜬다.
+    # publish_optical_tf 를 켠 것과 같은 이유다. bag 재생처럼 TF 트리가 이미
+    # 녹화된 경우에는 부모가 둘이 되므로 base 기본값은 false 로 둔다.
+    ("publish_world_tf", "true"),
     # 원래 근거는 VRAM 이었다 — 렌더프로덕트 텍스처가 재할당되면 ROS2 발행
     # 노드의 CUDA 핸들이 무효가 되고, 1008 -> 672 로 낮춰 CUDA 에러가
     # 23,410 -> 0 회가 됐다. **그 근거는 이제 성립하지 않는다** (2026-08-24

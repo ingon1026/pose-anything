@@ -77,14 +77,16 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 38; 40; 46
-    # camera_link 여야 한다. 광학 프레임(camera_color_optical_frame)은 +Z 가
-    # 카메라 정면 — 위에서 내려다보는 이 셋업에서는 물리적으로 **아래**다.
-    # RViz 는 +Z 를 화면 위로 그리므로 그걸 고정 프레임으로 두면 높이가
-    # 뒤집혀 보인다: 블록 윗면(z=0.945)이 아래로, 구멍 바닥(z=0.983)이 위로
-    # 간다. 실측 2026-08-28 — 파인 부분이 본체보다 높아 보인다는 보고의 정체가
-    # 이것이었다. 점군 값 자체는 옳았다(전 블록 최고 높이 55.0mm 동일).
-    # camera_link 는 ROS 관례(X 정면·Z 위)라 뒤집히지 않는다.
-    Fixed Frame: camera_link
+    # **world 여야 한다.** perception_node.py:195-199 가 이 파일의 Fixed Frame 을
+    # "world" 로 못박고 있다. 그러려면 publish_world_tf:=true 가 필요하다.
+    #
+    # 광학 프레임(camera_color_optical_frame)을 쓰면 안 된다 — +Z 가 카메라
+    # 정면이고 위에서 내려다보는 이 셋업에서 그것은 물리적으로 **아래**다.
+    # RViz 는 +Z 를 화면 위로 그리므로 높이가 통째로 뒤집힌다: 블록 윗면
+    # (z=0.945)이 아래로, 구멍 바닥(z=0.983)이 위로 간다. 2026-08-28 에
+    # "파인 부분이 본체보다 높아 보인다" 는 보고의 정체가 이것이었다.
+    # 점군 값 자체는 옳았다 — 25프레임에서 전 블록 최고 높이 55.0mm 동일.
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:
