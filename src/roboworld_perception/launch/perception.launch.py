@@ -52,7 +52,12 @@ def generate_launch_description():
         DeclareLaunchArgument("image_size", default_value="0"),
         # 공칭 1m camera-above-belt TF는 로봇 좌표가 아니다. 실제 셀의
         # world/base 변환은 캘리브레이션된 외부 TF가 책임진다.
-        DeclareLaunchArgument("publish_world_tf", default_value="false"),
+        # rviz 설정의 Fixed Frame 이 "world" 라 rviz 를 여는 실행은 이 TF 가
+        # 반드시 있어야 한다 — 없으면 RViz 가 아무것도 안 그리고 에러도 안 난다.
+        # 그래서 기본값을 rviz 인자에 묶는다. 공칭·비캘리브 값이므로 rviz 를
+        # 안 쓰는 실행(통합·headless)에서는 그대로 꺼진 채로 남는다.
+        DeclareLaunchArgument("publish_world_tf",
+                              default_value=LaunchConfiguration("rviz")),
         # Isaac Sim 이 이미지를 직접 발행하면 RealSense 드라이버가 없어
         # camera_link -> camera_color_optical_frame 이 비므로 여기서 켠다.
         # bag 재생에는 그 링크가 이미 녹화돼 있어 켜면 TF 가 깨진다 — 기본 false.

@@ -113,10 +113,17 @@ CSV="output/ros_$(date +%Y%m%d_%H%M%S).csv"
 echo ">> 노드 로그: $LOG"
 echo ">> 노드 시작 (SAM3 로딩 ~40초, 체크포인트 첫 다운로드면 훨씬 길다)..."
 DISPLAY_PARAM=true
-[ "$HEADLESS" = "1" ] && DISPLAY_PARAM=false
+# rviz 설정의 Fixed Frame 이 "world" 다. 그 프레임은 publish_world_tf 로만
+# 생기므로, rviz 를 여는 실행에서는 반드시 같이 켜야 한다 — 안 켜면 RViz 가
+# 아무것도 안 그린다(에러도 안 난다). headless 는 rviz 를 안 여니 끈다:
+# 노드가 "uncalibrated nominal RViz-only transform" 경고를 내는 값이라
+# 필요 없는 실행에서는 안 내보내는 편이 맞다.
+WORLD_TF_PARAM=true
+if [ "$HEADLESS" = "1" ]; then DISPLAY_PARAM=false; WORLD_TF_PARAM=false; fi
 setsid ros2 run roboworld_perception perception_node --ros-args \
   -p prompts:="$PROMPTS" -p score_threshold:="$THRESHOLD" \
-  -p display:=$DISPLAY_PARAM -p csv_path:="$CSV" > "$LOG" 2>&1 &
+  -p display:=$DISPLAY_PARAM -p publish_world_tf:=$WORLD_TF_PARAM \
+  -p csv_path:="$CSV" > "$LOG" 2>&1 &
 NODE_PID=$!
 PIDS+=($NODE_PID)
 # "SAM3 ready"는 perception_node가 찍는 로그 — 노드 쪽 문구 변경 시 함께 수정
@@ -147,8 +154,6 @@ done
 if [ "$HEADLESS" = "1" ]; then
   echo ">> 준비 완료 (headless) — 토픽: /perception/detections"
 else
-  # world TF는 perception_node가 camera_info의 실제 frame 이름으로 직접
-  # 발행한다 (frame 이름이 bag·카메라 설정마다 달라 여기서 하드코딩 불가)
   if ! command -v rviz2 > /dev/null 2>&1; then
     echo "!! rviz2 가 없습니다 — 3D 마커 창은 뜨지 않습니다 (ros-base 설치에는 없다)."
     echo "   sudo apt install ros-jazzy-rviz2   ·  또는 --headless 로 실행"
