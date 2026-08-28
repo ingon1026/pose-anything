@@ -182,6 +182,11 @@ on first run — no local build needed. To build from source instead: `docker co
 > publishes nothing. Observed 2026-08-25: replaying a bag with Isaac open produced a
 > header-only CSV and a log full of `camera_info changed`; `ROS_DOMAIN_ID=77` on both the
 > node and the player fixed it in one run.
+>
+> **Domain isolation does not cover `run.sh`'s node cleanup.** `run.sh` runs
+> `pkill -f "roboworld_perception/perception_node"` on startup, and again on exit.
+> That match is at the process level and ignores `ROS_DOMAIN_ID`, so a `run.sh`
+> invocation kills perception nodes on **every** domain, not just yours (measured).
 
 Model weights are **not** baked into the image (Meta's gated license) — they are
 downloaded once on first run into a mounted cache volume and reused afterwards.
@@ -253,6 +258,11 @@ Everything else in the scene is ignored.
 It then starts the perception node, RViz (preset with 3D boxes and axes), and a
 full-size debug window. Per-frame results are logged to `output/ros_<timestamp>.csv`.
 
+Any run that opens RViz also turns `publish_world_tf` on — the preset's Fixed
+Frame is `world`, and that frame exists only because of this TF. Without it RViz
+draws nothing and reports no error. (`--headless` leaves it off, and so does any
+launch with `rviz:=false`.)
+
 Offline processing (no ROS runtime — reads the bag directly, writes mp4 + CSV):
 
 ```bash
@@ -289,12 +299,16 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 | `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, geometric OBB pose, size, covariance — in the camera optical frame reported by `camera_info` |
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
+| `/perception/points` | `sensor_msgs/PointCloud2` | per-object points of this frame's raw observation, coloured by track ID — **off by default**, see below |
 | `/perception/status` | `diagnostic_msgs/DiagnosticArray` | 입력 건강 하트비트, **1 Hz**. `status[0].name = roboworld_perception/input`, `hardware_id = rgbd_camera` |
 
 **Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
-`publish_world_tf` (false — never enable this nominal RViz-only TF for robot
-coordinates; supply a calibrated camera-to-world/base TF externally instead),
+`publish_points` (false — see below),
+`publish_world_tf` (defaults to the `rviz` launch argument, so runs that open
+RViz enable it; never use this nominal, uncalibrated RViz-only TF as robot
+coordinates — the node warns when it publishes one — supply a calibrated
+camera-to-world/base TF externally instead),
 `use_sim_time` (false for normal camera/bag launches; `isaac.launch.py` sets it
 true for both perception and RViz)
 
@@ -311,6 +325,27 @@ persistent low-score fragments would otherwise reach a consumer. It is an
 absolute threshold, so a track sitting near the value flickers in and out —
 set it well below the scores you expect. `launch/isaac.launch.py` carries the
 measurement that decides its value — read that comment before changing it.
+
+`/perception/points` is an inspection tool, not a steady-state output. Turn it
+on with `ros2 launch roboworld_perception perception.launch.py
+publish_points:=true` — `run.sh` does not expose the flag. Its publish gate is
+literally the same as `/perception/detections` — same loop, same `publishable`
+decision — so the two topics always talk about the same objects, and a frame
+with nothing to publish is sent as `width=0` rather than not sent. It costs
+about **8 bytes per mask pixel**, so the frame size follows object size, not
+object count: measured 4.6 KB per Isaac block (~592 mask px) and 55.8 KB for a
+book/keyboard-sized mask (7,310 px) — a 12x spread, roughly 15-170 KB per frame
+for three objects. Measure it on your own scene rather than quoting one number.
+There is also per-track packing work in the publish path. The RViz
+preset carries a PointCloud2 display for it, **disabled by default**: it is
+meant to *replace* the MarkerArray, not to overlay it — boxes and points drawn
+on top of each other are both unreadable — so tick it and untick MarkerArray.
+
+> **⚠ The cloud and the box are the same object, but not the same geometry.**
+> A box's center and extent come from the track's **filter state**; the cloud is
+> **this frame's raw observation**, which the χ² and footprint gates may have
+> rejected. Seeing the two disagree is the point of this topic — do not use it to
+> validate the boxes. Full contract: `docs/bridge_contract.md` §6.3.
 
 What a consumer actually receives (captured from a real run — the per-axis
 position variance is filled in by the fusion filter. The OBB quaternion is for
@@ -348,7 +383,7 @@ src/roboworld_perception/         ROS 2 package (ament_python)
     pose_covariance.py            position covariance for PoseWithCovariance
     perception_node.py            ROS 2 node
   rviz/perception.rviz            RViz preset
-  test/                           pytest, 14 files incl. filter property tests
+  test/                           pytest, 16 files incl. filter property tests
                                   (`pytest src/roboworld_perception/test -q`;
                                    `scripts/check_ci_env.sh` reproduces CI)
 scripts/run_offline.py            bag → mp4/CSV without ROS

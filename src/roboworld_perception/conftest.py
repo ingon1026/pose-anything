@@ -1,8 +1,6 @@
 import sys
 from pathlib import Path
 
-from pathlib import Path
-
 import numpy as np
 
 # 패키지 루트 — 설정 파일(launch/·rviz/)을 읽는 테스트가 쓴다.

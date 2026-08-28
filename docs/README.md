@@ -184,6 +184,7 @@ Isaac 브리지와 토픽이 충돌해 출력이 전량 폐기된다(§3-1, §5)
 | **언제 충돌하나** | Isaac Sim ROS 2 브리지가 떠 있는 채로 bag 재생·라이브 실행을 할 때. 노드가 구독하는 이름이 `/camera/camera/color/image_raw` · `/camera/camera/color/camera_info` · `/camera/camera/aligned_depth_to_color/image_raw` 로 (`perception_node.py:112-115`) 브리지가 쏘는 이름과 **같다** |
 | **어떻게 격리하나** | `ROS_DOMAIN_ID=77 ./run.sh bags/test4` — 노드(`run.sh:117`) · bag player(`:180`) · rviz2(`:157`) · RealSense launch(`:79`) 가 전부 이 셸의 자식이라 export 가 그대로 상속된다. `77` 은 실행으로 검증된 값이다(§3-1, §5) |
 | **격리됐는지 확인** | **격리한 바로 그 셸에서** `ros2 topic info -v /camera/camera/color/camera_info` → Publisher count 가 의도한 발행자 수(bag 재생만이면 1)인가. ⚠ **다른 셸에서 치면 그 셸의 도메인을 세고 "깨끗하다" 고 나온다** — 확인 절차 자체가 무성 실패한다 |
+| ⚠ **격리가 안 막는 것** | **`run.sh` 의 정리는 도메인을 안 본다.** 시작할 때 `pkill -f "roboworld_perception/perception_node"` 를 무조건 돌리므로(`run.sh:49-51`) **다른 도메인에서 돌던 인식 노드까지 죽는다** — 격리는 DDS 계층이고 pkill 은 프로세스 계층이라 서로 못 막는다. 2026-08-28 실측: Isaac 을 기본 도메인에서 돌리는 중에 `ROS_DOMAIN_ID=77 ./run.sh bags/test4` 를 띄우니 Isaac 쪽 노드가 죽었다. **동시에 쓰려면 도메인만으로는 부족하고 실행 자체를 나눠야 한다** |
 | **잊으면 보이는 것** | CSV 가 **헤더 1줄**. 로그에 `camera_info changed (size, intrinsics, or frame); tracker reset` 반복. **에러도 크래시도 없다** — 노드는 살아서 매 프레임 리셋만 한다(§3-1, §5) |
 
 ⚠ **호스트에서 건 격리는 컨테이너에 안 간다.** `docker-compose.yml` 의
