@@ -48,6 +48,11 @@
 | [bridge_contract.md](bridge_contract.md) **§6** | **비전이 내보내는 것 — 소비자 계약.** §6.1 `/perception/status`(`diagnostic_msgs/DiagnosticArray`, **1 Hz**) 의 레벨 규칙(`input_health.classify_input_health`)·KeyValue **10키**(`prompts` 포함 — **`level` 만으로는 빈 프롬프트를 못 잡는다**)·**입력 계약 검증**. §6.2 회전 covariance 는 **측정값이 아니라 sentinel** |
 | [datasets.md](datasets.md) | bag 목록·실측 사실·**권장 프롬프트**·필요한 데이터. **"게이트 불변식" 절 — 어휘를 바꾸기 전에 `publish_score_min` 과의 관계를 숫자로 확인할 것** |
 
+### 운용 환경
+| 문서 | 요지 |
+|---|---|
+| [shared_server_2026-08-31.md](shared_server_2026-08-31.md) | **DGX Spark 공유 서버 운용.** 통합 메모리라 **총량이 분모인 VRAM 파생값(여유·%)이 성립하지 않는다** — 저장소의 OOM 위험 모델이 거기 걸려 있다. `scripts/measure_vram.sh` 도 그대로 못 쓴다. 여럿이 쓸 때의 `ROS_DOMAIN_ID`·`pkill` 사정거리·파일 소유권·HF 캐시 공유 |
+
 ### 의사결정
 | 문서 | 요지 |
 |---|---|
@@ -175,7 +180,8 @@ Isaac 브리지와 토픽이 충돌해 출력이 전량 폐기된다(§3-1, §5)
 
 **격리는 저장소 어디에도 안 걸려 있다 — 매 셸에서 손으로 걸어야 한다.**
 `run.sh:45` → `scripts/ros_env.sh:28-29` 는 전송 변수 둘만 export 하고,
-`perception.launch.py:20,24` · `docker-compose.yml:15-22` 도 같은 둘뿐이다.
+`perception.launch.py:20,24` · `docker-compose.yml` 의 `environment:` 도 같은 둘뿐이다
+(줄번호로 안 적는다 — 그 파일은 계속 움직인다).
 저장소 안의 유일한 `ROS_DOMAIN_ID` 사용처는 `test/test_perception_node.py:18`
 (테스트 격리용) 하나다.
 
@@ -321,6 +327,14 @@ Isaac 브리지와 토픽이 충돌해 출력이 전량 폐기된다(§3-1, §5)
     (이걸 놓쳐 "두께 −18%" 오측이 한 번 올라갔다: [image_size](image_size_2026-08-21.md) ④)
   - 재개 지연 — `datasets.md` 의 "최대 3.2초" 는 **완전 가림 후 재개**이고,
     [publish_gap](publish_gap_2026-08-24.md) 의 13.4초는 **부분 가림 지속 시간**이다. 다른 양이다
+  - **VRAM — 어느 기계에서 잰 값인지 밝힐 것.** 저장소의 VRAM 수치는 전부
+    **RTX 4070 Ti 12,282 MiB · WSL2** 값이다. 그리고 **여유·비율은 기계를 옮기면
+    수치가 아니라 정의가 깨진다** — DGX Spark(GB10)은 통합 메모리라 `nvidia-smi
+    --query-gpu=memory.total` 이 `[N/A]` 를 내서 `12GB 대비 여유` · `남는 여유` ·
+    `79.7%` 같은 **분모가 있는 양이 계산 자체가 안 된다.** 절대 사용량(② ④ ·
+    SAM3 몫 · `+178 MiB`)은 값만 달라진다.
+    → [shared_server](shared_server_2026-08-31.md) §1. **여유가 없는 것이 위험하다**
+    는 저장소의 OOM 위험 모델이 여기 걸려 있다
 - **"정답" 을 만들기 전에, 정답이 이미 저장소에 있는지 먼저 볼 것.**
   이 폴더는 *"기록은 있는데 안 읽혔다"* 때문에 만들어졌다(맨 위 인용문).
   **같은 사고가 정밀도 쪽에서 한 번 더 났다** — Isaac 씬 정답(카메라 z=1.408,

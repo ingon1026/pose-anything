@@ -130,7 +130,11 @@ a pinned dependency version — an old reference silently blesses the old behavi
 and a Hugging Face account — everything below ships inside the image. For native installs:
 
 - Ubuntu 24.04 (verified on WSL2) with **ROS 2 Jazzy**
-- NVIDIA GPU with ≥ 6 GB VRAM, PyTorch CUDA build (bf16 inference)
+- NVIDIA GPU with ≥ 6 GB VRAM, PyTorch CUDA build (bf16 inference). **That figure
+  assumes a card with dedicated VRAM** — every memory number in this repository was
+  measured on an RTX 4070 Ti (12,282 MiB) under WSL2. On unified-memory machines
+  (e.g. DGX Spark / GB10) `nvidia-smi` reports no total at all, so this requirement
+  does not translate as written: see [`docs/shared_server_2026-08-31.md`](docs/shared_server_2026-08-31.md)
 - Python 3.12 — `torch==2.10.0`, `transformers==5.5.0`, `open3d==0.19.0`, `rosbags`,
   `scipy`, `opencv-python` (the first three are pinned — see *Native install* below)
 - Intel RealSense D455 + [`realsense2_camera`](https://github.com/IntelRealSense/realsense-ros) for live input
@@ -164,6 +168,19 @@ docker compose run --rm perception ./run.sh path/to/your/bag --prompts "book"
 The prebuilt image is pulled from
 [Docker Hub (`ingon1026/pose-anything`)](https://hub.docker.com/r/ingon1026/pose-anything)
 on first run — no local build needed. To build from source instead: `docker compose build` (~21 GB).
+
+**On arm64 (DGX Spark, Jetson) you have to build** — the Hub image is amd64-only, so a
+plain `docker compose run` fails with *no matching manifest for linux/arm64*:
+
+```bash
+export HF_TOKEN=hf_xxxx
+docker compose build                          # BuildKit sets TARGETARCH=arm64 itself
+docker compose run --build --rm perception
+```
+
+`Dockerfile` swaps in the CUDA 13.0 PyTorch wheels and an Open3D wheel from upstream's
+release page on that branch; nothing else changes. **None of the numbers in this README
+were measured on arm64.**
 
 > **If you edited the source, you must pass `--build`.** The service declares both
 > `build:` and `image:` with no `pull_policy`, so Compose *pulls first* and only builds
