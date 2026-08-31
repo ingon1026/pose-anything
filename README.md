@@ -183,10 +183,11 @@ docker compose build                          # BuildKit sets TARGETARCH=arm64 i
 docker compose run --build --rm perception
 ```
 
-`IMAGE_TAG` is a stopgap: the architecture is something the machine already knows, and
-carrying that `.env` to an x86 box breaks it. The real fix is one multi-arch manifest
-(`docker buildx imagetools create`), which needs the arm64 tag pushed first — see
-`docs/shared_server_2026-08-31.md` §9-1.
+`IMAGE_TAG` is one line you live with: the architecture is something the machine already
+knows, and carrying that `.env` to an x86 box breaks it. A multi-arch manifest would
+remove it, but that needs the arm64 tag pushed to Hub, and on a single shared machine
+that push buys nothing — the image is already in the local daemon. See
+`docs/shared_server_2026-08-31.md` §9-5 for when pushing does start to pay.
 
 `Dockerfile` swaps in the CUDA 13.0 PyTorch wheels and an Open3D wheel from upstream's
 release page on that branch; nothing else changes. **None of the numbers in this README
