@@ -20,10 +20,23 @@ RUN apt-get update && apt-get install -y \
     fonts-noto-cjk \
     libgl1 libgomp1 usbutils \
   && rm -rf /var/lib/apt/lists/*
+# 이 블록은 아키텍처로 갈리지 않는다 — 위 여섯 패키지가 packages.ros.org 의
+# binary-arm64 에 amd64 와 **같은 이름으로 전부** 있다(글로브 `librealsense2*`
+# 도 매치된다. 매치가 0건이면 apt 가 실패하므로 확인했다 - 2026-08-31 인덱스 조회).
 
 # ──────────────────────────────────────────
 # 2. pip: PyTorch CUDA (가장 무거운 레이어 — 소스 복사보다 먼저 캐시)
 # ──────────────────────────────────────────
+# ⚠ **여기부터 아키텍처가 갈린다** (amd64 워크스테이션 / arm64 DGX Spark).
+# TARGETARCH 는 BuildKit 이 자동으로 채우는 예약 ARG 다 — 선언만 하면 값이 온다.
+# **legacy builder(`DOCKER_BUILDKIT=0`)에서는 빈 문자열**이라 아래 분기가 전부
+# else(amd64) 로 떨어진다. amd64 보존이 최우선이라 fallback 을 그쪽에 뒀지만,
+# 그래서 **arm64 를 legacy builder 로 빌드하면 x86 핀을 깔고 이상하게 죽는다** —
+# arm64 는 `docker buildx` / 기본 BuildKit 으로 빌드할 것.
+# 갈리는 곳은 아래 두 RUN(torch, open3d)뿐이고, 이 선언을 apt 블록 뒤에 둔 것도
+# apt 레이어 캐시를 건드리지 않기 위해서다.
+ARG TARGETARCH
+
 # ⚠ torch / transformers / open3d 는 **고정한다.** 이 저장소의 성능·정확도
 # 수치는 전부 특정 조합에서 잰 값이고(docs/README.md §5 "측정 조건을 같이
 # 적을 것"), 재빌드가 이 셋 중 하나를 올리면 측정 조건 전체가 라벨을 잃는다.
@@ -33,8 +46,23 @@ RUN apt-get update && apt-get install -y \
 # 짝이 안 맞는 버전이 잡힌다).
 # 올릴 때는 버전만 바꾸지 말고 scripts/check_accuracy.py 로 기준 대비
 # 회귀부터 판정할 것.
-RUN pip3 install --break-system-packages \
-    torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+#
+# ⚠ **CUDA 빌드 변종만 아키텍처로 갈린다 — 버전(2.10.0 / 0.25.0)은 양쪽이 같다.**
+# arm64(DGX Spark, GB10 Blackwell)는 cu130 이어야 한다: 그 기계의 툴킷이
+# CUDA 13.0 이고, **cu128 인덱스에는 aarch64 휠이 아예 없다**(cu130 인덱스에는
+# `torch-2.10.0+cu130-cp312-cp312-manylinux_2_28_aarch64.whl` ·
+# `torchvision-0.25.0+cu130-...-aarch64.whl` 이 있다 - 2026-08-31 인덱스 조회).
+# amd64 는 위 측정이 돌던 cu128 조합 그대로다 — else 가지는 분기 전 줄과 동일하다.
+# **올릴 때는 두 가지를 같이 올릴 것.** 한쪽만 올리면 조용히 갈라진다.
+# 그리고 **arm64 로 잰 값은 amd64 표와 같은 표에 넣지 말 것** — CUDA 층도 GPU 도
+# 다르므로 측정 조건이 다른 수치다(docs/README.md §5).
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      pip3 install --break-system-packages \
+        torch==2.10.0+cu130 torchvision==0.25.0+cu130 --index-url https://download.pytorch.org/whl/cu130 ; \
+    else \
+      pip3 install --break-system-packages \
+        torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128 ; \
+    fi
 
 # ⚠ opencv 는 pip 패키지 버전과 라이브러리 버전이 다르다 — cv2.__version__ 은
 # 4.13.0 인데 pip 패키지는 4.13.0.92 다(4자리). __version__ 을 그대로 핀으로
@@ -47,8 +75,29 @@ RUN pip3 install --break-system-packages \
 # numpy/opencv 는 마스크·OBB 경로 전체가 탄다. 측정 조건을 고정한다면서
 # 이들을 띄워 두면 고정이 절반만 성립한다 — 호스트(측정이 돌던 곳) 값으로
 # 맞춘다. 위 네 개와 같은 이유다.
-RUN pip3 install --break-system-packages --ignore-installed \
-    transformers==5.5.0 open3d==0.19.0 \
+#
+# open3d 만 arm64 에서 출처가 다르다 — **PyPI 0.19.0 에 aarch64 휠이 없다.**
+# 상류 릴리스 자산에서 직접 받되, **한 pip 호출 안에서 변수로만 갈랐다.** 따로
+# 떼어 두 번 install 하면 resolver 가 두 번 돌아 아래 `numpy==2.5.0` 을 open3d 가
+# 요구하는 범위로 조용히 갈아치울 수 있고, 그게 이 저장소가 제일 무서워하는
+# "측정 조건이 라벨을 잃는" 경로다. 핀을 두 벌 적지 않는 이유도 같다 — 한쪽만
+# 올라가 갈라지는 패턴은 `isaac.launch.py` 주석이 이미 금지한 것이다.
+# manylinux_2_35 는 노블(glibc 2.39)이 충족한다. `opencv-python` 은 휠 이름이
+# `cp37-abi3` 라 헷갈리지만 aarch64 빌드가 있어 그대로 간다.
+#
+# ⚠ **`main-devel` 은 움직이는 태그다** — 맨 위 `FROM ros:jazzy-ros-base` 와 같은
+# 종류의 문제로, **같은 URL 이 예고 없이 다른 파일을 가리킬 수 있다.** 그러면
+# 재빌드가 open3d 를 조용히 올리고 측정 조건이 라벨을 잃는다. 오늘(2026-08-31)
+# 조회한 앵커: `Content-Length 48,247,379` · `Last-Modified 2026-07-09`.
+# 제대로 묶으려면 `--hash=sha256:<...>` 인데 그러려면 46MB 를 받아 해시를 떠야
+# 한다 - 아직 안 골랐다.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      OPEN3D=https://github.com/isl-org/Open3D/releases/download/main-devel/open3d-0.19.0-cp312-cp312-manylinux_2_35_aarch64.whl ; \
+    else \
+      OPEN3D=open3d==0.19.0 ; \
+    fi ; \
+    pip3 install --break-system-packages --ignore-installed \
+    transformers==5.5.0 "$OPEN3D" \
     numpy==2.5.0 scipy==1.17.1 opencv-python==4.13.0.92 pillow==12.1.1 \
     rosbags==0.11.3 \
     pytest==9.0.2
