@@ -143,11 +143,10 @@ docker run --user $(id -u):$(id -g) -e USER=$(id -un) -e HOME=/tmp ...
 
 **§7-5 의 SAM3 측정은 전부 이 조합으로 돌렸다.**
 
-⚠ `docker-compose.yml` 은 **안 고쳤다.** `environment:` 에 `- USER` 를 더하면 될
-것으로 보이나 **compose 경로로는 확인하지 않았다. 미확인.** 그리고 그 파일의 기존
-주석은 이 증상을 *"`HOME` 이 `/` 로 잡혀 `~/.ros/log` 가 막힐 수 있다"* 로 적어
-뒀는데 **실제 증상은 그게 아니다** — 주석이 제안한 `ROS_HOME=/tmp/ros` 로는 안
-풀린다. **import 자체가 죽는다.**
+✅ **`docker-compose.yml` 을 고쳤고 실행으로 확인했다 — §9 참고.**
+그 파일의 기존 주석은 이 증상을 *"`HOME` 이 `/` 로 잡혀 `~/.ros/log` 가 막힐 수
+있다"* 로 적어 뒀는데 **실제 증상은 그게 아니었다** — 주석이 제안한
+`ROS_HOME=/tmp/ros` 로는 안 풀린다. **import 단계라 그보다 앞이다.** 주석도 고쳤다.
 
 **쓰기 권한은 돌았다.** 공유 캐시(`/data/hf-cache`, setgid·그룹 `k3i`)에
 non-root(`1008:1008`)로 **3.3GB 를 정상적으로 받아 썼고** 파일이 `ingon:k3i` 로
@@ -387,3 +386,65 @@ run_offline.py --prompts "blue bar with holes" --image-size 0(=1008)
 - **풋프린트·중심·RPY** — 두께와 평면만 봤다. `check_accuracy.py` 로 기준 CSV 와
   쌍 비교를 하려면 **4070 Ti 쪽 CSV 가 있어야 하는데 이 기계에 없다**
 - **실기 bag**(test2/test4) — 정답이 없어 arm64 판정에는 못 쓴다
+
+## 9. `docker compose` 경로 — 세 군데를 고쳤다 (2026-08-31)
+
+**이 파일을 이 기계에서 처음 실제로 돌려봤다.** 세 개가 걸렸고 셋 다 고쳤다.
+고치기 전에는 **`docker compose up` 이 arm64 에서 시작조차 못 했다.**
+
+### 9-1. `image: latest` 가 amd64 전용이었다
+
+```
+docker manifest inspect ingon1026/pose-anything:latest → linux/amd64 하나뿐
+1.3.0        → 있음 (amd64)
+1.3.0-arm64  → Hub 에 없음 (아직 푸시 안 함)
+```
+
+→ `image:` 를 `${IMAGE_TAG:-latest}` 로 바꾸고 `.env` 에 `IMAGE_TAG=1.3.0-arm64`
+를 둔다. **x86 쪽 기본 동작은 안 바뀐다.**
+
+**`pull_policy: missing` 도 같이 넣었다.** 이 파일이 원래 주석으로 경고하던
+*"소스를 고쳐도 Hub 이미지가 조용히 돈다"* 는 문제가 여기서도 걸린다 — 로컬
+빌드가 있는데 Hub 을 먼저 보러 간다. `missing` 은 **로컬에 있으면 로컬을 쓴다.**
+최신 Hub 이미지가 필요하면 `docker compose pull` 로 명시할 것.
+
+### 9-2. `USER`·`HOME` 이 없어 SAM3 가 죽었다
+
+§4 의 그 오류다. `environment:` 에 두 줄을 넣었다:
+
+```yaml
+- USER=${USER:-ubuntu}   # getpass.getuser() 가 pwd 조회 전에 먼저 본다
+- HOME=/tmp              # uid 미등록 시 HOME 이 `/` 가 되어 ~/.ros/log 가 막힌다
+```
+
+`${USER:-ubuntu}` 의 기본값이 `ubuntu` 인 것은 **값이 있기만 하면 되기 때문**이다 —
+`getpass.getuser()` 는 그 이름이 passwd 에 있는지 확인하지 않는다.
+
+### 9-3. DDS 설정은 이미 있었다 — 다만 `docker run` 에는 없다
+
+`FASTDDS_BUILTIN_TRANSPORTS`·`RMW_IMPLEMENTATION` 은 compose 에 **원래 들어 있다.**
+문제는 **`docker run` 으로 직접 돌릴 때**다. 오늘 라이브 재생에서 실제로 걸렸다 —
+`camera_info`(작음)는 오는데 **이미지(큰 메시지)가 에러 없이 안 왔다.** 그 두 줄을
+붙이니 `RGB-D input healthy` 로 바뀌었다. **카메라를 붙이면 같은 자리에서 걸린다.**
+
+### 9-4. 확인 방법과 결과
+
+```
+docker compose config                    → image 1.3.0-arm64 · user 1008:1008
+                                           USER=ingon · HOME=/tmp · pull_policy missing
+docker compose run --rm perception \
+  python3 scripts/run_offline.py ...     → 4 frames · dist_thresh=3mm inlier=0.512
+                                           트랙 6개, docker run 결과와 일치
+ls -l output/                            → ingon:ingon — 본인이 지울 수 있다
+```
+
+대조로, **`--user` 없는 `docker run` 은 여전히 `root:root` 를 남긴다**(확인함).
+`docker run` 경로를 쓸 때는 `--user $(id -u):$(id -g) -e USER=$(id -un) -e HOME=/tmp`
+를 손으로 붙여야 한다.
+
+### 9-5. 남은 것
+
+- **`network_mode: host`** — compose 는 호스트 네트워크를 쓴다. 여럿이 동시에
+  ROS 를 띄우면 §3 의 도메인 배정이 그대로 필요하다. **오늘은 혼자 썼다.**
+- **RealSense 라이브 경로** — 같은 파일 주석대로 `user:` 줄이 카메라를 깨뜨린다.
+  카메라가 없어 **확인 못 했다.**

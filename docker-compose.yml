@@ -5,8 +5,16 @@ services:
     # pull 을 시도하고** 레지스트리에서 못 찾을 때만 빌드한다(Compose 사양,
     # build.md "Using build and image"). 즉 소스를 고쳐도 `docker compose up`
     # 은 Hub 이미지를 받아 돌린다 — 조용히, 아무 표시 없이.
-    # 고친 소스를 돌리려면 `docker compose build` 또는 `up --build` 를 쓸 것.
-    image: ingon1026/pose-anything:latest
+    # → 아래 `pull_policy: missing` 으로 그 동작을 껐다: **로컬에 있으면 로컬
+    #   것을 쓰고, 없을 때만 받는다.** 고친 소스 반영은 여전히
+    #   `docker compose build` 또는 `up --build`, 최신 Hub 이미지는
+    #   `docker compose pull` 로 명시해서 받을 것.
+    pull_policy: missing
+    # ⚠ **태그를 아키텍처가 가른다.** Hub 의 `latest` 와 `1.3.0` 은 **amd64 전용**
+    # 이다(2026-08-31 `docker manifest inspect` 확인 — `linux/amd64` 하나뿐).
+    # arm64(DGX Spark)에서 그냥 두면 여기서 깨진다. `.env` 에
+    # `IMAGE_TAG=1.3.0-arm64` 를 넣고 로컬 빌드를 쓸 것.
+    image: ingon1026/pose-anything:${IMAGE_TAG:-latest}
     network_mode: host        # 호스트 ROS 노드와 DDS 통신
     ipc: host
     privileged: true          # RealSense USB 접근 (bag만 쓰면 제거 가능)
@@ -18,8 +26,9 @@ services:
     # 둘 중 하나를 쓸 것 — **둘 다 실측 확인함**:
     #   export UID; export GID=$(id -g)      # 그 셸에서 계속 유효
     #   echo "UID=$(id -u)" > .env && echo "GID=$(id -g)" >> .env
-    # ⚠ **`.env` 는 `.gitignore` 에 없다** — 쓸 거면 먼저 추가할 것. Compose 는
-    # `.env` 를 자동으로 읽으므로 거기에 `HF_TOKEN` 을 적어 두면 토큰이 커밋된다.
+    # ⚠ **`.env` 는 이제 `.gitignore` 에 있다**(2026-08-31 확인) — `HF_TOKEN` 을
+    # 적어도 커밋되지 않는다. 토큰은 `scripts/set_hf_token.sh` 로 넣으면
+    # 유효성과 `facebook/sam3` 게이트까지 확인한 뒤 기록한다.
     # **`UID=$(id -u) docker compose ...` 는 안 된다** — bash 에서 `UID` 는
     # readonly 라 `UID: readonly variable` 로 그 자리에서 죽는다.
     # ⚠ **RealSense 라이브 경로는 이 줄을 켜면 깨진다** — `/dev/bus/usb` 노드가
@@ -28,16 +37,25 @@ services:
     # (bag 재생·헤드리스는 무관하고, 공유 서버 용도가 그쪽이라 기본값을 켜 둔다).
     # ⚠ 아래 마운트 대상(`./output`, HF 캐시 디렉터리)이 **호스트에 없으면**
     # Docker 가 root 소유로 만들어 첫 쓰기가 막힌다 — 먼저 `mkdir -p` 할 것.
-    # ⚠ **미확인**: uid 가 이미지의 `/etc/passwd` 에 없으면 `HOME` 이 `/` 로 잡혀
-    # rclpy 의 `~/.ros/log` 생성이 막힐 수 있다. 1000 은 노블 베이스의 `ubuntu`
-    # 사용자라 괜찮을 것으로 보지만 컨테이너로 확인하지 않았다 — 걸리면
-    # `ROS_HOME=/tmp/ros` 를 environment 에 추가할 것.
+    # ⚠ **확인됨(2026-08-31 실행)** — uid 가 이미지의 `/etc/passwd` 에 없으면
+    # `HOME` 이 `/` 로 잡히는 정도가 아니라 **SAM3 import 자체가 죽는다**:
+    #   KeyError: 'getpwuid(): uid not found: 1008'
+    #   modeling_sam3.py:29 → torchvision/ops/poolers.py → getpass.getuser()
+    # 이미지에는 uid **1000(`ubuntu`)만** 있어서 기본값은 우연히 통과하지만,
+    # 위 안내대로 자기 uid 를 넣는 순간 걸린다 — **소유권을 고치는 조치가
+    # 컨테이너를 깨뜨린다.** 아래 environment 의 `USER`·`HOME` 이 그걸 막는다.
+    # (`ROS_HOME=/tmp/ros` 로는 안 풀린다 — import 단계라 더 앞이다.)
     user: "${UID:-1000}:${GID:-1000}"
     stdin_open: true
     tty: true
     environment:
       - HF_TOKEN              # gated facebook/sam3 다운로드용 (호스트 env 전달)
       - DISPLAY=${DISPLAY:-:0}
+      # 위 `user:` 주석의 uid 문제를 막는 두 줄. `getpass.getuser()` 는 pwd 를
+      # 뒤지기 **전에** LOGNAME·USER·LNAME·USERNAME 을 먼저 보므로, 값이 있기만
+      # 하면 uid 가 이미지 passwd 에 없어도 통과한다(2026-08-31 실행 확인).
+      - USER=${USER:-ubuntu}
+      - HOME=/tmp             # uid 미등록 시 HOME 이 `/` 가 되어 ~/.ros/log 가 막힌다
       # 계약서 §1.1. 컨테이너에는 호스트 .bashrc 가 없어 상속받을 곳이 아예 없다 —
       # 위 network_mode: host 로 호스트 ROS 노드와 DDS 로 붙는데 이게 없으면
       # 기본 UDP 가 되어 에러 없이 데이터가 안 온다. scripts/ros_env.sh 와 같은 값.
