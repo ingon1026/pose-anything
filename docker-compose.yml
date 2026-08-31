@@ -5,11 +5,8 @@ services:
     # pull 을 시도하고** 레지스트리에서 못 찾을 때만 빌드한다(Compose 사양,
     # build.md "Using build and image"). 즉 소스를 고쳐도 `docker compose up`
     # 은 Hub 이미지를 받아 돌린다 — 조용히, 아무 표시 없이.
-    # → 아래 `pull_policy: missing` 으로 그 동작을 껐다: **로컬에 있으면 로컬
-    #   것을 쓰고, 없을 때만 받는다.** 고친 소스 반영은 여전히
-    #   `docker compose build` 또는 `up --build`, 최신 Hub 이미지는
-    #   `docker compose pull` 로 명시해서 받을 것.
-    pull_policy: missing
+    # (`pull_policy: missing` 은 **해결책이 아니다** — 2026-08-31 실측으로 기본값과
+    #  동작이 같았다. 로컬에 있으면 둘 다 안 받고, 없으면 둘 다 받으려다 빌드한다.)
     # ⚠ **태그를 아키텍처가 가른다.** Hub 의 `latest` 와 `1.3.0` 은 **amd64 전용**
     # 이다(2026-08-31 `docker manifest inspect` 확인 — `linux/amd64` 하나뿐).
     # arm64(DGX Spark)에서 그냥 두면 여기서 깨진다. `.env` 에
@@ -25,7 +22,10 @@ services:
     # 이 된다(2026-08-31 `docker compose config` 로 실측). uid 가 1000 이 아니면
     # 둘 중 하나를 쓸 것 — **둘 다 실측 확인함**:
     #   export UID; export GID=$(id -g)      # 그 셸에서 계속 유효
-    #   echo "UID=$(id -u)" > .env && echo "GID=$(id -g)" >> .env
+    #   printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" >> .env
+    # ⚠ **`>` 로 덮지 말 것.** `.env` 에는 이제 `HF_TOKEN`·`IMAGE_TAG` 도 들어가서
+    # 잘라쓰면 그것들이 조용히 날아간다. 토큰은 `scripts/set_hf_token.sh` 가
+    # 다른 키를 보존하며 갱신한다.
     # ⚠ **`.env` 는 이제 `.gitignore` 에 있다**(2026-08-31 확인) — `HF_TOKEN` 을
     # 적어도 커밋되지 않는다. 토큰은 `scripts/set_hf_token.sh` 로 넣으면
     # 유효성과 `facebook/sam3` 게이트까지 확인한 뒤 기록한다.

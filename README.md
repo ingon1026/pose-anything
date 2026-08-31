@@ -173,10 +173,20 @@ on first run — no local build needed. To build from source instead: `docker co
 plain `docker compose run` fails with *no matching manifest for linux/arm64*:
 
 ```bash
-export HF_TOKEN=hf_xxxx
+# .env — Compose reads it automatically; it is git-ignored.
+#   IMAGE_TAG=1.3.0-arm64   ← the local build gets this name instead of :latest,
+#                             which on Hub is amd64 and would collide.
+#   UID / GID               ← see the comments in docker-compose.yml
+./scripts/set_hf_token.sh hf_xxxx             # validates the token, then writes .env
+
 docker compose build                          # BuildKit sets TARGETARCH=arm64 itself
 docker compose run --build --rm perception
 ```
+
+`IMAGE_TAG` is a stopgap: the architecture is something the machine already knows, and
+carrying that `.env` to an x86 box breaks it. The real fix is one multi-arch manifest
+(`docker buildx imagetools create`), which needs the arm64 tag pushed first — see
+`docs/shared_server_2026-08-31.md` §9-1.
 
 `Dockerfile` swaps in the CUDA 13.0 PyTorch wheels and an Open3D wheel from upstream's
 release page on that branch; nothing else changes. **None of the numbers in this README

@@ -24,6 +24,10 @@
 #   docs/bridge_contract.md §1.1 / docker-compose.yml /
 #   src/roboworld_perception/launch/perception.launch.py (SetEnvironmentVariable) /
 #   (Windows) cellomni 실행.bat
+# ⚠ `docker run` 으로 직접 띄우면 이 파일이 **안 읽힌다** — `docker-entrypoint.sh`
+#   는 `/opt/ros` 와 `/ws/install` 만 source 한다. 그 경로에서는 위 두 값을 `-e` 로
+#   손으로 넘겨야 하고, 안 넘기면 `camera_info` 만 오고 이미지가 조용히 안 온다
+#   (2026-08-31 라이브 재생에서 실제로 걸렸다. docs/shared_server_2026-08-31.md §9-3)
 # Windows 쪽 사본은 이 저장소가 관리할 수 없다 — 한쪽만 켜면 안 붙는다.
 export FASTDDS_BUILTIN_TRANSPORTS='LARGE_DATA?max_msg_size=190KB&sockets_size=200KB&non_blocking=true&tcp_negotiation_timeout=50'
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
