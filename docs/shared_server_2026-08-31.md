@@ -113,8 +113,9 @@ DDS 계층이고 pkill 은 프로세스 계층이라 서로 못 막는다(2026-0
   선택이 아니라 필수다.** → **넘기는 방법 두 가지가 그 주석 블록에 있다
   (`.env` 또는 `UID=$(id -u) GID=$(id -g) docker compose ...`). 거기를 읽어라.**
   RealSense 라이브 경로가 이 줄로 깨지는 것도 같은 주석에 적혀 있다.
-- **`docker run` / `Dockerfile` 직접 — 여전히 root 다.** `Dockerfile` 에 `USER`
-  선언이 없다. 이 경로로 돌리면 `--user $(id -u):$(id -g)` 를 손으로 붙여야 한다.
+- **`docker run` / `Dockerfile` 직접 — 기본은 여전히 root 다.** `Dockerfile` 에
+  `USER` 선언이 없다. 이 경로로 돌리면 `--user $(id -u):$(id -g)` 를 붙여야 하고,
+  **그것만 붙이면 된다** — 나머지는 엔트리포인트가 처리한다(아래).
 
 ⚠ **확인됨 (2026-08-31 실측) — 소유권을 고치는 그 조치가 컨테이너를 깨뜨린다.**
 `--user` 로 non-root 를 걸면 **그 uid 가 이미지 `/etc/passwd` 에 없을 때 SAM3 가
@@ -133,15 +134,21 @@ docker run --user 1008:1008 ... -c "from transformers import Sam3Model"
 - 그런데 위에서 "필수" 라고 한 **`.env`(자기 uid)를 넣는 순간 7 명 전원이 이 오류를
   맞는다** — 이 기계에 uid 1000 인 팀원이 없다(§3 명단)
 
-**해법 — `USER` 를 같이 넘길 것.** `getpass.getuser()` 는 `pwd` 조회 **전에**
-`LOGNAME`·`USER`·`LNAME`·`USERNAME` 을 먼저 본다:
+✅ **고쳤다 — 이제 `--user` 만 붙이면 된다(2026-08-31).**
+`docker-entrypoint.sh` 가 `getent passwd $(id -u)` 로 uid 등록 여부를 보고,
+없으면 `USER`·`HOME` 을 채운다. `getpass.getuser()` 는 `pwd` 조회 **전에**
+`LOGNAME`·`USER`·`LNAME`·`USERNAME` 을 보므로 그것으로 통과한다.
+**엔트리포인트는 compose·`docker run` 양쪽의 공통 경로라 한 번에 덮인다.**
 
 ```
-docker run --user $(id -u):$(id -g) -e USER=$(id -un) -e HOME=/tmp ...
-→ getpass.getuser() = ingon · SAM3 import 성공
+docker run --user $(id -u):$(id -g) …        ← 보조 환경변수 없이
+→ getpass.getuser() = appuser · HOME = /tmp · SAM3 import 성공
+docker compose run …                          ← .env 의 USER=ingon 이 우선한다
+→ getpass.getuser() = ingon
 ```
 
-**§7-5 의 SAM3 측정은 전부 이 조합으로 돌렸다.**
+**§7-5·§8 의 측정은 이 수정 이전에 `-e USER=…` 를 손으로 붙여 돌린 것이다** —
+값에는 영향이 없다(같은 환경변수를 누가 넣느냐의 차이일 뿐).
 
 ✅ **`docker-compose.yml` 을 고쳤고 실행으로 확인했다.**
 그 파일의 기존 주석은 이 증상을 *"`HOME` 이 `/` 로 잡혀 `~/.ros/log` 가 막힐 수
@@ -440,14 +447,19 @@ docker manifest inspect ingon1026/pose-anything:latest → linux/amd64 하나뿐
 **기전과 해법은 §4 에 있다.** 여기서는 그 해법을 `environment:` 에 `USER` 와
 `HOME` 두 줄로 넣었다는 것만 적는다.
 
-⚠ **compose 에만 넣은 것이라 `docker run`·k8s·CI 경로는 여전히 죽는다**(§9-5).
+✅ **그 뒤 엔트리포인트에서 근본을 고쳐 `docker run`·k8s·CI 도 덮었다**(§4).
+compose 의 이 두 줄은 이제 **`.env` 로 이름을 지정하고 싶을 때만** 의미가 있다 —
+없어도 엔트리포인트가 기본값을 채운다.
 
 ### 9-3. DDS 설정은 이미 있었다 — 다만 `docker run` 에는 없다
 
-`FASTDDS_BUILTIN_TRANSPORTS`·`RMW_IMPLEMENTATION` 은 compose 에 **원래 들어 있다.**
-문제는 **`docker run` 으로 직접 돌릴 때**다. 오늘 라이브 재생에서 실제로 걸렸다 —
+`FASTDDS_BUILTIN_TRANSPORTS`·`RMW_IMPLEMENTATION` 은 compose 에 **원래 들어 있었다.**
+문제는 **`docker run` 으로 직접 돌릴 때**였다. 오늘 라이브 재생에서 실제로 걸렸다 —
 `camera_info`(작음)는 오는데 **이미지(큰 메시지)가 에러 없이 안 왔다.** 그 두 줄을
-붙이니 `RGB-D input healthy` 로 바뀌었다. **카메라를 붙이면 같은 자리에서 걸린다.**
+붙이니 `RGB-D input healthy` 로 바뀌었다.
+
+✅ **이것도 엔트리포인트에서 고쳤다** — `scripts/ros_env.sh`(이 값들의 정본)를
+`source` 하므로 **`docker run` 도 자동으로 덮인다.** 이미 걸려 있으면 덮지 않는다.
 
 ### 9-4. 확인 방법과 결과
 
@@ -460,9 +472,9 @@ docker compose run --rm perception \
 ls -l output/                            → ingon:ingon — 본인이 지울 수 있다
 ```
 
-대조로, **`--user` 없는 `docker run` 은 여전히 `root:root` 를 남긴다**(확인함).
-`docker run` 경로를 쓸 때는 `--user $(id -u):$(id -g) -e USER=$(id -un) -e HOME=/tmp`
-를 손으로 붙여야 한다.
+대조로, **`--user` 를 안 붙인 `docker run` 은 여전히 `root:root` 를 남긴다**(확인함).
+소유권만은 Docker 가 정하는 것이라 엔트리포인트가 대신할 수 없다 — **`--user` 는
+붙여야 하고, 그것 하나면 된다.**
 
 ### 9-5. 남은 것
 
@@ -470,12 +482,81 @@ ls -l output/                            → ingon:ingon — 본인이 지울 �
   ROS 를 띄우면 §3 의 도메인 배정이 그대로 필요하다. **오늘은 혼자 썼다.**
 - **RealSense 라이브 경로** — 같은 파일 주석대로 `user:` 줄이 카메라를 깨뜨린다.
   카메라가 없어 **확인 못 했다.**
-- ⚠ **compose 밖 경로는 아직 안 고쳤다 — 이 절의 수정은 절반이다.**
-  `docker run`·k8s·CI 로 띄우면 §9-2 의 uid 오류도, §9-3 의 DDS 누락도 그대로다.
-  지금은 사용자가 `-e` 로 손으로 붙이게 되어 있는데 **그게 옳은 깊이가 아니다.**
-  근본은 이미지 층이다 — `docker-entrypoint.sh` 가 두 경로 공통의 `ENTRYPOINT`
-  이므로, 거기서 (a) `getent passwd $(id -u)` 가 비면 `/etc/passwd` 에 한 줄 추가,
-  (b) `source /ws/scripts/ros_env.sh` 를 하면 **양쪽이 동시에 덮이고 compose 의
-  사본도 지울 수 있다.** 이미지 재빌드가 필요해 이번에는 안 했다.
+- ✅ **compose 밖 경로도 고쳤다(2026-08-31, 재빌드함).** `docker-entrypoint.sh`
+  가 두 경로 공통의 `ENTRYPOINT` 라 거기서 uid 보정과 `ros_env.sh` source 를
+  한다. 실행 확인 — `docker run --user 1008:1008` 만으로 `getpass.getuser()`
+  `appuser` · `HOME` `/tmp` · DDS 두 값 설정 · SAM3 import 성공 ·
+  `run_offline.py` 완주(`dist_thresh=3mm`, 출력 `ingon:ingon`).
+  compose 도 안 깨졌다(`.env` 의 `USER=ingon` 이 우선).
 - **멀티아치 매니페스트** — `IMAGE_TAG` 를 없앨 방법(§9-1). `1.3.0-arm64` 푸시가
   선행돼야 한다.
+
+## 10. 라이브 ROS 경로 — 실행으로 확인 (2026-08-31)
+
+지금까지는 **오프라인**(`run_offline.py`, 파일 → 파일)만 확인했다. ROS 노드가
+실제로 토픽을 채워 발행하는지는 별개 문제라 따로 돌렸다.
+
+### 10-1. 측정 조건
+
+```
+docker run … -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+              -e FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA?…      ← §9-3. 없으면 안 온다
+   ⚠ 이 측정은 엔트리포인트 수정 **이전**이라 손으로 넘겼다. 지금은 자동이다(§9-3).
+ROS_DOMAIN_ID=91 · 컨테이너 기본 네트워크(격리) — compose 의 network_mode: host
+는 호스트 DDS 에 그대로 붙으므로 공유 서버에서는 남과 섞인다
+노드 파라미터는 **기본값** (detect_interval=5) · prompts "blue bar with holes"
+bag  isaac_belt_moving 을 `ros2 bag play` 로 **실시간**(106초) 재생
+```
+
+### 10-2. 결과 — 돈다
+
+```
+받은 메시지 39건 · 검출이 담긴 것 24건 · 빈 것 15건
+검출 있는 메시지의 평균 물체 수 6.0
+```
+
+한 메시지 안의 값(SSH 로 그대로 읽힌다):
+
+```
+blue bar with holes  0.93  d=1.147  (-0.607,-0.004,+0.974)  whd=(53,216,57)mm  yaw=-89.1°
+blue bar with holes  0.93  d=0.977  (-0.086,+0.001,+0.973)  whd=(195,48,57)mm  yaw= +0.0°
+```
+
+**두께 56~57mm 로 오프라인 실행값과 같다.** `yaw` 가 `−89.9°` 와 `+0.0°` 두 무리로
+갈리는 것도 벨트 위 블록 배치와 맞는다.
+
+**`/perception/status` 도 전부 텍스트다** — `input_contract_valid: true` ·
+`out_of_order_frame_drops: 0`. **GUI 없이 SSH 만으로 건강 상태를 볼 수 있다.**
+화면이 필요한 것은 `/perception/markers`·`/perception/points`(RViz) 둘뿐이다.
+
+⚠ **발행률 0.40 Hz 를 오프라인 값과 나란히 놓지 말 것.** bag 은 26.1Hz 로 트는데
+발행은 0.4Hz 다 — 노드 기본값 `detect_interval=5` 에다 추론이 프레임보다 느려
+대부분을 흘려보낸다. **§7-5 의 `detect()` 349ms 는 파일 처리 기준**이고 여기는
+실시간 재생 기준이라 **조건이 다른 양이다.** 같은 실행의
+`last_processing_duration_ms 62.8` 도 키프레임이 아닌 프레임의 값이라 그것만
+떼어 인용하면 안 된다.
+
+**입력이 끊기면 낡은 자세를 지우는 설계가 실제로 도는 것도 봤다** — 재생이 끝난 뒤
+`RGB-D input stale`(`last_frame_age_s 12.163`)과 로그의
+*"입력 없음 5.0초 — 검출·마커 회수"* 가 그것이다. 정상 동작이다.
+
+### 10-3. `isaac_belt` 이 깨졌다는 진단이 확정됐다
+
+**같은 명령이 두 bag 에서 갈렸다**:
+
+| bag | 검출이 담긴 메시지 |
+|---|---|
+| `isaac_belt` (정지) | **0 건** — 68회 "RGB-D 프레임이 안 옵니다" 경고만 |
+| `isaac_belt_moving` | **24 건** |
+
+`isaac_belt` 은 color 78 장 중 4 장만 depth 와 짝이 붙어([datasets](datasets.md):30)
+**실시간 재생에서는 그 4 장마저 동기화 창을 놓친다.** 오프라인은 자체 deque 로
+짝을 찾아 4 프레임을 건지지만 라이브는 못 건진다. **시스템 문제가 아니다.**
+
+### 10-4. 확인하지 **않은** 것
+
+- **여럿이 동시에 ROS 를 띄울 때** — 이번엔 컨테이너 네트워크로 격리했다.
+  `network_mode: host`(compose 기본)로 여럿이 붙으면 §3 의 도메인 배정이 필요하다.
+- **실시간 처리율의 의미 있는 값** — `detect_interval` 을 바꿔가며 재지 않았다.
+  위 0.40Hz 는 **기본값 한 점**일 뿐이다.
+- **RViz 계열 토픽**(`markers`·`points`) — 화면이 없어 못 봤다.
