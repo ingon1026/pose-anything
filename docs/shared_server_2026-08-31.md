@@ -116,8 +116,43 @@ DDS 계층이고 pkill 은 프로세스 계층이라 서로 못 막는다(2026-0
 - **`docker run` / `Dockerfile` 직접 — 여전히 root 다.** `Dockerfile` 에 `USER`
   선언이 없다. 이 경로로 돌리면 `--user $(id -u):$(id -g)` 를 손으로 붙여야 한다.
 
-**미확인** — 어느 쪽이든 non-root 로 컨테이너 안 쓰기 권한이 다 도는지는 안
-돌려봤다. HF 캐시를 읽기 전용으로 공유하면(§5) 캐시 쓰기가 같이 막히므로 함께 볼 것.
+⚠ **확인됨 (2026-08-31 실측) — 소유권을 고치는 그 조치가 컨테이너를 깨뜨린다.**
+`--user` 로 non-root 를 걸면 **그 uid 가 이미지 `/etc/passwd` 에 없을 때 SAM3 가
+import 단계에서 죽는다**:
+
+```
+docker run --user 1008:1008 ... -c "from transformers import Sam3Model"
+→ KeyError: 'getpwuid(): uid not found: 1008'
+  transformers/models/sam3/modeling_sam3.py:29
+   → torchvision/__init__.py → torchvision/ops/poolers.py → getpass.getuser()
+```
+
+이미지 `/etc/passwd` 에는 **uid 1000(`ubuntu`)만** 있다(확인함). 그래서:
+
+- compose **기본값 `1000:1000` 은 우연히 통과한다** — 노블 베이스의 `ubuntu` 다
+- 그런데 위에서 "필수" 라고 한 **`.env`(자기 uid)를 넣는 순간 7 명 전원이 이 오류를
+  맞는다** — 이 기계에 uid 1000 인 팀원이 없다(§3 명단)
+
+**해법 — `USER` 를 같이 넘길 것.** `getpass.getuser()` 는 `pwd` 조회 **전에**
+`LOGNAME`·`USER`·`LNAME`·`USERNAME` 을 먼저 본다:
+
+```
+docker run --user $(id -u):$(id -g) -e USER=$(id -un) -e HOME=/tmp ...
+→ getpass.getuser() = ingon · SAM3 import 성공
+```
+
+**§7-5 의 SAM3 측정은 전부 이 조합으로 돌렸다.**
+
+⚠ `docker-compose.yml` 은 **안 고쳤다.** `environment:` 에 `- USER` 를 더하면 될
+것으로 보이나 **compose 경로로는 확인하지 않았다. 미확인.** 그리고 그 파일의 기존
+주석은 이 증상을 *"`HOME` 이 `/` 로 잡혀 `~/.ros/log` 가 막힐 수 있다"* 로 적어
+뒀는데 **실제 증상은 그게 아니다** — 주석이 제안한 `ROS_HOME=/tmp/ros` 로는 안
+풀린다. **import 자체가 죽는다.**
+
+**쓰기 권한은 돌았다.** 공유 캐시(`/data/hf-cache`, setgid·그룹 `k3i`)에
+non-root(`1008:1008`)로 **3.3GB 를 정상적으로 받아 썼고** 파일이 `ingon:k3i` 로
+떨어졌다. 다만 §5 의 권고대로 **읽기 전용으로 공유하면 이 쓰기가 같이 막힌다** —
+받는 사람만 쓰기 권한을 갖는 구성이어야 한다.
 
 ## 5. HF 모델 캐시 — 한 벌만 두면 각자 다시 안 받는다
 
@@ -224,17 +259,57 @@ JIT 이 안 걸린다는 것뿐이고, CUDA 는 모듈을 지연 로드(`LAZY`)�
 잃는다**([README](README.md) §5). 위 표대로 **얻을 성능이 0** 이므로 지금은 근거가
 없다. 경고는 뜨는 대로 두고, 이 절을 가리키면 된다.
 
-### 7-5. 이 절이 확인하지 **않은** 것
+### 7-5. SAM3 실측 — 여기서도 JIT 은 0 이다
 
-- **SAM3 자체는 안 돌려봤다.** `facebook/sam3` 는 게이트된 저장소이고
-  (익명 `config.json` → **401**) 이 기계에 HF 토큰이 없다. **§7 의 근거는 전부
-  일반 torch 커널이다.** `transformers 5.5.0` 의 SAM3 전용 커널·torchvision
-  NMS/ROI·open3d 는 **미확인.**
-- **SAM3 로드 시간 · 추론 1회차/2회차 — 미확인.** RTX 4070 Ti 의 4.1초(단독)는
-  **다른 기계 다른 CUDA 값이라 여기 옮겨 적지 않는다.**
-- 위 값은 **기계를 혼자 쓰는 상태**에서 잰 것이다(§2 의 주의와 같다).
+**측정 조건**: DGX Spark · GB10 · 드라이버 580.95.05 · CUDA 13.0 ·
+`ingon1026/pose-anything:1.3.0-arm64` · `HF_HOME=/data/hf-cache`(공유) ·
+**노드 기본값**(`image_size=0` → **1008px** · `score_threshold=0.4` · bf16) ·
+입력 **720×1280 합성 이미지** · 프롬프트 `물통`(→`thermos`) ·
+**기계를 혼자 쓰는 상태** · **컨테이너 신규 기동 3 회, 중앙값**.
 
-### 7-6. 덤으로 확인된 것 — `docker run` 은 root 소유 파일을 남긴다 (§4)
+**로드**
+
+| | 값 |
+|---|---|
+| 첫 실행 — **3.44GB 다운로드 포함** | 106.3 초 |
+| **캐시 후** (n=3) | **2.38 초** (2.37~2.39) |
+| 내역 | import 1.25 · `from_pretrained`→cuda 0.91 · processor 0.22 |
+| 모델 | 840.4M 파라미터 · bfloat16 · `model.safetensors` **3,439,938,512 B** |
+
+> §5 의 "`facebook/sam3` 몫 3.44GB"(팀 리드 보고값, 저장소 미확인)가 **Spark 에서
+> 확인됐다.** 다만 같은 절의 "호스트 캐시 43GB" 는 여전히 다른 기계 값이다 —
+> **이 기계에는 오늘 받기 전까지 HF 캐시가 하나도 없었다.**
+
+**추론** — `Sam3Detector.detect()` 를 한 프로세스에서 6 회 연속 호출
+
+| `detect()` | 기본(운용 조건) | `CUDA_DISABLE_PTX_JIT=1` |
+|---|---|---|
+| **#1** | 935.9 ms | 938.1 ms |
+| **#2~6** | 348.8 ms | 349.4 ms |
+| **1회차 초과분** | **587.1 ms** | **588.7 ms** |
+
+**JIT 을 금지해도 초과분이 587 → 589ms 로 그대로다 — 1회차 초과분에 PTX JIT 은
+0 이다.** §7-2 의 결론이 SAM3 경로에서도 그대로 성립한다. 남는 587ms 는
+cuDNN·cuBLAS 알고리즘 선택 · 지연 모듈 로드 · 할당자 워밍업, 그리고
+`sam3_detector.py` 의 `_text_cache` 가 채워지는 첫 텍스트 임베딩이다.
+
+⚠ **RTX 4070 Ti 의 4.1초(단독)와 나란히 놓지 말 것.** 시간 정의만 같고
+(`transformers` import 전부터 계산) **기계도 CUDA 층도 다르다.** 같은 표에
+넣지 않는 이유는 [README](README.md) §5 와 같다.
+
+⚠ **합성 이미지라 검출이 0 건이다.** `post_process_instance_segmentation` 비용은
+검출 수에 비례하므로 **실제 장면은 이보다 느리다.** 위 값은 **인코더 경로 기준**
+이고, 검출이 있는 장면의 `detect()` 시간은 **미확인**이다.
+
+### 7-6. 이 절이 확인하지 **않은** 것
+
+- **검출이 있는 실제 장면의 `detect()` 시간** — 위 ⚠ 참고. 마스크 후처리·NMS 를
+  거의 안 탔다. torchvision NMS/ROI 커널은 그래서 **여전히 미확인.**
+- **open3d 경로**(자세 추정·점군) — 이 절은 검출까지만 봤다. **미확인.**
+- **지연 로드(`CUDA_MODULE_LOADING=LAZY`)로 안 건드린 커널** — §7-3 의 주의와 같다.
+- **여럿이 동시에 쓸 때** — §6 그대로 값이 없다.
+
+### 7-7. 덤으로 확인된 것 — `docker run` 은 root 소유 파일을 남긴다 (§4)
 
 §4 가 "`docker run` 직접 경로는 여전히 root" 라고 적어둔 것이 **오늘 실행으로
 재현됐다.** `-v` 로 붙인 캐시 디렉터리에 **`uid 0` 소유 · `drwx------`** 로
