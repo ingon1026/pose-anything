@@ -37,7 +37,8 @@ _PRESET = [
     # 빠졌던 HEAD 열. **셋 중 어느 값이든 결론(병목 아님)은 같다.**
     # 상세는 docs/image_size_2026-08-21.md ③
     #
-    # ⚠ **위 "여유 N MiB" 는 전용 VRAM 12GB(RTX 4070 Ti)를 분모로 한 값이다.**
+    # ⚠ **이 파일의 VRAM 수치는 전부 전용 VRAM 12GB(RTX 4070 Ti)를 분모로 한 값이다**
+    # (아래 rviz 항목의 "12 GB 에서 넘친다" 도 포함).
     # DGX Spark(GB10)처럼 **통합 메모리**인 기계에서는 `nvidia-smi` 가
     # `memory.total` 을 `[N/A]` 로 내므로(2026-08-31 실측) **이 파생값은 계산
     # 자체가 안 된다.** 절대 사용량(9,797 / 8,869 / 9,585)은 여전히 "그 기계에서
@@ -115,8 +116,6 @@ _PRESET = [
     ("sync_queue_size", "1"),
     # detect_interval=1 에 RViz 까지 얹으면 12 GB GPU 에서 넘친다.
     # 실측: CUDA 에러 37,151 회 뒤 [omni.rtx] GPU crash, Isaac SIGSEGV.
-    # ⚠ 이것도 **전용 VRAM 12GB 기준**이다 — 통합 메모리 기계에서는 넘치는
-    # 지점이 다르고, 위와 같은 이유로 **다시 재야 한다.**
     # 영상만 볼 거면 grab_debug.py 쪽이 안전하다.
     ("rviz", "false"),
     # base 기본값 1 은 벨트 위 블록을 하나만 잡는다. 씬에는 8 개가 올라가 있어
