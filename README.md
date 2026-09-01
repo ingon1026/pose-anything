@@ -169,7 +169,7 @@ The prebuilt image is pulled from
 [Docker Hub (`ingon1026/pose-anything`)](https://hub.docker.com/r/ingon1026/pose-anything)
 on first run — no local build needed. To build from source instead: `docker compose build` (~21 GB).
 
-**On arm64 (DGX Spark, Jetson) you have to build** — the Hub image is amd64-only, so a
+**On arm64 you have to build** — the Hub image is amd64-only, so a
 plain `docker compose run` fails with *no matching manifest for linux/arm64*:
 
 ```bash
@@ -192,6 +192,16 @@ that push buys nothing — the image is already in the local daemon. See
 `Dockerfile` swaps in the CUDA 13.0 PyTorch wheels and an Open3D wheel from upstream's
 release page on that branch; nothing else changes. **None of the numbers in this README
 were measured on arm64.**
+
+**What the arm64 branch actually requires is CUDA 13.0**, not merely aarch64 — the wheels
+are `+cu130` and the machine it was verified on runs driver 580.95.05. Nothing in the
+`Dockerfile` is specific to GB10, so any aarch64 host with a driver new enough for CUDA 13.0
+should work, and only DGX Spark has been tried. **Jetson is a different case and was
+previously listed here in error**: JetPack pins the driver to its L4T BSP (CUDA 12.x at the
+time of writing), so the `+cu130` wheels have no driver to run against, and PyTorch for
+Tegra comes from NVIDIA's own index rather than `download.pytorch.org`. That reasoning is
+from the version constraints, **not from a build attempt** — if you need Jetson, check
+`nvidia-smi` for the CUDA version first; it will not be a matter of just building.
 
 > **If you edited the source, you must pass `--build`.** The service declares both
 > `build:` and `image:` with no `pull_policy`, so Compose *pulls first* and only builds
