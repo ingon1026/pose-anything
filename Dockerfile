@@ -30,12 +30,27 @@ RUN apt-get update && apt-get install -y \
 # ⚠ **여기부터 아키텍처가 갈린다** (amd64 워크스테이션 / arm64 DGX Spark).
 # TARGETARCH 는 BuildKit 이 자동으로 채우는 예약 ARG 다 — 선언만 하면 값이 온다.
 # **legacy builder(`DOCKER_BUILDKIT=0`)에서는 빈 문자열**이라 아래 분기가 전부
-# else(amd64) 로 떨어진다. amd64 보존이 최우선이라 fallback 을 그쪽에 뒀지만,
-# 그래서 **arm64 를 legacy builder 로 빌드하면 x86 핀을 깔고 이상하게 죽는다** —
-# arm64 는 `docker buildx` / 기본 BuildKit 으로 빌드할 것.
+# else(amd64) 로 떨어진다. amd64 보존이 최우선이라 fallback 을 그쪽에 뒀다.
 # 갈리는 곳은 아래 두 RUN(torch, open3d)뿐이고, 이 선언을 apt 블록 뒤에 둔 것도
 # apt 레이어 캐시를 건드리지 않기 위해서다.
 ARG TARGETARCH
+
+# ⚠ **빈 TARGETARCH 로 arm64 를 빌드하면 조용히 틀린 게 깔린다.** 2026-08-31 확인:
+# cu128 인덱스에 `torch-2.10.0+cu128-cp312-cp312-manylinux_2_28_aarch64.whl` 이
+# **있다.** 그래서 else 가지가 aarch64 에서 실패하지 않고 **CUDA 12.8 빌드를 성공적으로
+# 깐다** — CUDA 13.0 기계(GB10)에 맞지 않는 물건이다. 빌드는 그 뒤 open3d 에서야
+# 죽는데(PyPI 0.19.0 에 aarch64 휠이 없다), 그때 뜨는 오류는 open3d 를 지목하므로
+# **원인이 TARGETARCH 라는 것을 아무도 못 읽는다.** 핀을 의심하며 시간을 쓰게 되고,
+# 이 저장소에서 핀을 건드리는 것이 가장 위험한 행동이다(바로 아래 블록).
+# 그래서 여기서 이름을 대고 멈춘다 — run.sh 가 realsense2_camera 부재를 기동 전에
+# 알리는 것과 같은 기전이다. **위험한 조합에서만 멈춘다** — 빈 TARGETARCH 로도
+# amd64 는 else 가지가 정답이므로 기존 legacy 빌드를 깨지 않는다.
+RUN if [ -z "$TARGETARCH" ] && [ "$(uname -m)" = "aarch64" ]; then \
+      echo "TARGETARCH 가 비었는데 빌드 기계가 aarch64 다 — legacy builder(DOCKER_BUILDKIT=0)로 돌고 있다."; \
+      echo "이대로 두면 CUDA 12.8 휠이 깔리고 open3d 에서야 죽어 원인을 못 읽는다."; \
+      echo "BuildKit 으로 빌드할 것: DOCKER_BUILDKIT=1 docker build … / docker buildx build …"; \
+      exit 1 ; \
+    fi
 
 # ⚠ torch / transformers / open3d 는 **고정한다.** 이 저장소의 성능·정확도
 # 수치는 전부 특정 조합에서 잰 값이고(docs/README.md §5 "측정 조건을 같이
@@ -48,10 +63,12 @@ ARG TARGETARCH
 # 회귀부터 판정할 것.
 #
 # ⚠ **CUDA 빌드 변종만 아키텍처로 갈린다 — 버전(2.10.0 / 0.25.0)은 양쪽이 같다.**
-# arm64(DGX Spark, GB10 Blackwell)는 cu130 이어야 한다: 그 기계의 툴킷이
-# CUDA 13.0 이고, **cu128 인덱스에는 aarch64 휠이 아예 없다**(cu130 인덱스에는
-# `torch-2.10.0+cu130-cp312-cp312-manylinux_2_28_aarch64.whl` ·
-# `torchvision-0.25.0+cu130-...-aarch64.whl` 이 있다 - 2026-08-31 인덱스 조회).
+# arm64(DGX Spark, GB10 Blackwell)는 cu130 이어야 한다 — 그 기계의 툴킷이 CUDA 13.0 이다.
+# ⚠ **cu128 에도 aarch64 휠은 있다**(`torch-2.10.0+cu128-cp312-cp312-manylinux_2_28_aarch64.whl`
+# - 2026-08-31 인덱스 조회). 즉 **잘못 갈려도 설치는 성공한다** — 그래서 위 가드가 있다.
+# 골라야 하는 근거는 "설치되느냐" 가 아니라 **기계의 CUDA 층과 맞느냐** 다
+# (cu130 쪽: `torch-2.10.0+cu130-cp312-cp312-manylinux_2_28_aarch64.whl` ·
+# `torchvision-0.25.0+cu130-...-aarch64.whl` - 같은 날 조회).
 # amd64 는 위 측정이 돌던 cu128 조합 그대로다 — else 가지는 분기 전 줄과 동일하다.
 # **올릴 때는 두 가지를 같이 올릴 것.** 한쪽만 올리면 조용히 갈라진다.
 # 그리고 **arm64 로 잰 값은 amd64 표와 같은 표에 넣지 말 것** — CUDA 층도 GPU 도
@@ -89,8 +106,10 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 # 종류의 문제로, **같은 URL 이 예고 없이 다른 파일을 가리킬 수 있다.** 그러면
 # 재빌드가 open3d 를 조용히 올리고 측정 조건이 라벨을 잃는다. 오늘(2026-08-31)
 # 조회한 앵커: `Content-Length 48,247,379` · `Last-Modified 2026-07-09`.
-# 제대로 묶으려면 `--hash=sha256:<...>` 인데 그러려면 46MB 를 받아 해시를 떠야
-# 한다 - 아직 안 골랐다.
+# 제대로 묶으려면 `--hash=sha256:<...>` 인데 그러려면 46MB 를 받아 해시를 떠야 한다.
+# **만료 조건: arm64 수치를 문서에 한 줄이라도 기록하기 전에 해시를 뜰 것.** 그 순간
+# 이 휠은 측정 조건의 일부가 되고, 앵커 없이는 재빌드가 조건을 조용히 바꾼다. 그때는
+# 이미 빌드가 46MB 를 받은 뒤라 비용도 사실상 0 이다(`pip hash` 로 뜬다).
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
       OPEN3D=https://github.com/isl-org/Open3D/releases/download/main-devel/open3d-0.19.0-cp312-cp312-manylinux_2_35_aarch64.whl ; \
     else \
