@@ -146,7 +146,7 @@ docker run --user 1008:1008 ... -c "from transformers import Sam3Model"
 ```
 docker run --user $(id -u):$(id -g) …        ← 보조 환경변수 없이
 → getpass.getuser() = appuser · HOME = /tmp · SAM3 import 성공
-docker compose run …                          ← .env 의 USER=ingon 이 우선한다
+docker compose run …                          ← 호스트 셸의 USER=ingon 이 우선한다
 → getpass.getuser() = ingon
 ```
 

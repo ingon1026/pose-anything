@@ -8,9 +8,9 @@
 # `getpass` 는 pwd 조회 **전에** LOGNAME·USER·LNAME·USERNAME 을 보므로 값을
 # 채워주면 통과한다. `HOME` 은 uid 미등록 시 `/` 가 되어 `~/.ros/log` 가 막힌다.
 # 근거·실측: docs/shared_server_2026-08-31.md §4
-if ! getent passwd "$(id -u)" >/dev/null 2>&1; then
+if ! getent passwd "$EUID" >/dev/null 2>&1; then
   : "${USER:=appuser}"; export USER
-  case "${HOME:-/}" in /|"") HOME=/tmp ;; esac; export HOME
+  case "$HOME" in ""|/) HOME=/tmp ;; esac; export HOME
 fi
 
 source /opt/ros/jazzy/setup.bash
