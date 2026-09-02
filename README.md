@@ -86,7 +86,7 @@ Validated on self-recorded rosbags (13 s static / 20 s moving conveyor, not incl
 | Metric | Result |
 |---|---|
 | Track ID persistence (3 moving objects, 20 s) | single ID each, 0 axis flips |
-| OBB size — Isaac scene (USD model 200x55x55 mm) | footprint −4 to −8 mm; thickness **+1.97 mm** vs. the 54.5 mm visible height above the belt (the block sits 0.5 mm into it), measured on the `dist_thresh` **3 mm** branch — 500 frames, `image_size` 1008 (`47ad9cb`). The 6 mm fallback measured **+3.2 mm** on this same scene; test2/test4 fall back to 6 mm, but have no ground truth of their own, so their bias is unquantified |
+| OBB size — Isaac scene (USD model 200x55x55 mm) | footprint −4 to −8 mm; thickness **+1.97 mm** vs. the 54.5 mm visible height above the belt (the block sits 0.5 mm into it), measured on the `dist_thresh` **3 mm** branch — 500 frames, `image_size` 1008 (`47ad9cb`). The 6 mm fallback measured **+3.2 mm** on this same scene; test2/test4 fall back to 6 mm, but have no ground truth of their own, so their bias is unquantified. An opt-in sub-pixel footprint (`soft_footprint`, default off) measures W 56.05 / L 204.7 mm at 672 on the same 300 frames (vs 46.8 / 195.8 — W error 8×, L error same magnitude with flipped sign); not enabled by default until real-object ground truth exists — see `docs/subpixel_2026-08-25.md`. |
 | OBB size vs. real objects (test2/test3) | **not validated** — no measured ground truth for those bags yet |
 | Center jitter (static objects) | ≤ 1.5 mm std *(within a run; the support plane is fitted once and cached, so plane error does not appear in this figure — run-to-run plane spread is 0.40 mm on the Isaac scene and 13 mm on test2)* |
 | Yaw jitter | 0.94°/frame avg, 0% jumps > 5° |
