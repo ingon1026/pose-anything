@@ -314,7 +314,7 @@ class PerceptionPipeline:
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1, pub_score_min=0.0, enable_merge=True,
                  belt_plane=None, use_belt_plane=True,
-                 enable_footprint_gate=True, soft_footprint=False):
+                 enable_footprint_gate=True, soft_footprint=True):
         self.detector = detector
         self.depth_scale = depth_scale
         # 이번 프레임에 _update_geometry 가 만든 점군 (track_id -> 점 배열).
@@ -346,7 +346,9 @@ class PerceptionPipeline:
         self._plane_tried = False
         # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
         self.enable_footprint_gate = enable_footprint_gate
-        # 스파이크(2026-09-02): 풋프린트를 확률장 등고선으로. 기본 off — 기존 경로 그대로.
+        # 풋프린트를 확률장 등고선으로(geometry.contour_obb_on_plane). **기본 on — 2026-09-02
+        # 사용자 결정.** 실기 정답 없이 켰다(W34 Try 2 "합성 결과로 채택 안 함" 을 알고 넘김).
+        # 근거는 Isaac 정답 대비 W −8.2→+1.05 와 실기 3 bag 노이즈 동률·개선. False 면 옛 경로.
         self.soft_footprint = soft_footprint
         # 진단용 누적 카운터 — _reset_run_state() 가 아니라 여기 둔다.
         # reset() 으로 0 이 되면 "이번 런에서 몇 번 드롭됐나" 를 못 센다.

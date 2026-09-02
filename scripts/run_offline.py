@@ -146,9 +146,9 @@ def main():
     ap.add_argument("--no-footprint-gate", action="store_true",
                     help="부분 가림(풋프린트 절단) 관측 기각 끄기 (기본 켜짐 — "
                          "docs/footprint_gate_2026-08-21.md 의 물체별 표 참고)")
-    ap.add_argument("--soft-footprint", action="store_true",
-                    help="풋프린트를 SAM3 확률장 등고선(부분화소)으로 (스파이크 2026-09-02, "
-                         "geometry.contour_obb_on_plane)")
+    ap.add_argument("--no-soft-footprint", action="store_true",
+                    help="풋프린트를 옛 화소중심 경로로 (기본은 확률장 등고선 — "
+                         "geometry.contour_obb_on_plane, 2026-09-02 사용자 결정으로 기본 on)")
     ap.add_argument("--no-belt-plane", action="store_true",
                     help="벨트 평면 구속 OBB 끄기 (기본 켜짐 — 근거는 "
                          "docs/belt_plane_2026-08-21.md)")
@@ -178,7 +178,7 @@ def main():
         enable_merge=not args.no_merge,
         use_belt_plane=not args.no_belt_plane,
         enable_footprint_gate=not args.no_footprint_gate,
-        soft_footprint=args.soft_footprint,
+        soft_footprint=not args.no_soft_footprint,
         belt_plane=parse_plane(args.belt_plane))
 
     writer = None
