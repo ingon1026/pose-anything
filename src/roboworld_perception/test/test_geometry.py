@@ -2,9 +2,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from roboworld_perception.geometry import (MAX_THICKNESS, MIN_THICKNESS,
-                                           compute_obb, fit_plane,
-                                           mask_depth_to_points, match_axes,
-                                           obb_on_plane)
+                                           compute_obb, contour_obb_on_plane,
+                                           fit_plane, mask_depth_to_points,
+                                           match_axes, obb_on_plane)
 
 K = np.array([[600.0, 0, 320], [0, 600.0, 240], [0, 0, 1]])
 
@@ -239,3 +239,95 @@ def test_rotated_mask_footprint_is_stride_invariant():
                                        erode_px=0)
             return np.sort(obb_on_plane(pts, plane).extent[:2])[::-1]
         assert np.allclose(footprint(2), footprint(1), atol=1e-9), f"{ang}도"
+
+
+# ── contour_obb_on_plane: 등고선 기반 부분화소 풋프린트 ────────────
+def _synthetic_plate(ang_deg):
+    """SAM3 확률장 + h_map 합성 — sdf 사각형을 시그모이드로 흐려 iso=0.5 등고선이
+    참 경계(부분화소)에 오도록 만든다(경계 폭 ~1px)."""
+    K = np.array([[322.86, 0, 320.0], [0, 322.86, 180.0], [0, 0, 1.0]])
+    H, W = 360, 640
+    n, d = np.array([0.0, 0.0, -1.0]), 1.0              # 벨트 z=1.0
+    thk = 0.055
+    z_top = d - thk                                      # 상면 z=0.945
+    Lm, Wm = 0.200, 0.055
+    v, u = np.mgrid[0:H, 0:W].astype(np.float64)
+    x = (u + 0.5 - K[0, 2]) * z_top / K[0, 0]             # 화소 중심 역투영
+    y = (v + 0.5 - K[1, 2]) * z_top / K[1, 1]
+    th = np.radians(ang_deg)
+    xr = x * np.cos(th) + y * np.sin(th)
+    yr = -x * np.sin(th) + y * np.cos(th)
+    sdf = np.maximum(np.abs(xr) - Lm / 2, np.abs(yr) - Wm / 2)  # m, 안쪽 음수
+    px = z_top / K[0, 0]
+    prob = (1 / (1 + np.exp(sdf / (0.5 * px)))).astype(np.float32)  # 경계 폭 ~1px
+    h_map = np.where(prob > 0.5, thk, 0.0)                # 상면=thk, 벨트=0
+    return K, (n, d), thk, prob, h_map, x, y, xr, yr
+
+
+def test_contour_obb_recovers_rectangle_at_any_angle():
+    """등고선 부분화소 풋프린트는 각도와 무관하게 참값 근처다 — 대조군으로 같이 재는
+    obb_on_plane(화소중심) 이 0° 에서 잃는 손실(위 docstring)을 이 함수가 고친다."""
+    for ang_deg in (0, 12, 31):
+        K, plane, thk, prob, h_map = _synthetic_plate(ang_deg)[:5]
+        r = contour_obb_on_plane(prob, K, plane, thk, h_map)
+        assert r is not None
+        ext = np.sort(r.extent)[::-1][:2]
+        assert abs(ext[0] - 0.200) < 0.0005, f"{ang_deg}deg L={ext[0]*1000:.2f}mm"
+        assert abs(ext[1] - 0.055) < 0.0005, f"{ang_deg}deg W={ext[1]*1000:.2f}mm"
+
+    # 대조군: 같은 마스크(prob>0.5)의 화소 중심을 상면 높이에 그대로 놓고 obb_on_plane
+    # 을 돌리면 0° 에서 가장 긴 축이 참보다 3mm 이상 짧다 — 등고선 함수가 고치는 손실.
+    K, plane, thk, prob, h_map, x, y = _synthetic_plate(0)[:7]
+    mask = prob > 0.5
+    z_top = plane[1] - thk
+    pts = np.column_stack([x[mask], y[mask], np.full(mask.sum(), z_top)])
+    obb = obb_on_plane(pts, plane)
+    assert obb is not None
+    ext2 = np.sort(obb.extent)[::-1]
+    assert 0.200 - ext2[0] >= 0.003, f"pixel-center L={ext2[0]*1000:.2f}mm"
+
+
+def test_contour_obb_handles_two_height_silhouette():
+    """파인 블록: 가운데 100mm 구간이 폭 전체로 30mm 파였다 — 긴 변까지 닿아 실루엣이
+    두 높이(끝 캡 thk / 가운데 thk-30mm)에 걸친다(단일 평면 투사면 캡만 남는
+    docstring 실패 ②의 조건). 끝 캡과 파인 구간을 **각자의 z 평면에서 따로 렌더**해
+    합친다 — 실루엣 전체를 z_top 한 장에서 렌더해 놓고 h_map 만 낮추면 같은 화소를
+    더 먼 평면에 투사하는 꼴이라 W 가 부풀어(+1.6~1.9mm) 모순이었다(2026-09-02)."""
+    K, plane, thk, *_ = _synthetic_plate(0)[:3]
+    n, d = plane
+    carve = 0.030
+    Lm, Wm = 0.200, 0.055
+    H, W = 360, 640
+    v, u = np.mgrid[0:H, 0:W].astype(np.float64)
+
+    def rect_prob(z, ang_deg, xband):
+        x = (u + 0.5 - K[0, 2]) * z / K[0, 0]
+        y = (v + 0.5 - K[1, 2]) * z / K[1, 1]
+        th = np.radians(ang_deg)
+        xr = x * np.cos(th) + y * np.sin(th)
+        yr = -x * np.sin(th) + y * np.cos(th)
+        sdf = np.maximum(np.abs(xr) - Lm / 2, np.abs(yr) - Wm / 2)
+        px = z / K[0, 0]
+        p = 1 / (1 + np.exp(sdf / (0.5 * px)))
+        return np.where(xband(xr), p, 0.0)
+
+    pa = rect_prob(d - thk, 0, lambda xr: np.abs(xr) >= 0.05)         # 끝 캡, 높이 thk
+    pb = rect_prob(d - thk + carve, 0, lambda xr: np.abs(xr) < 0.05)  # 파인 구간, 높이 thk-carve
+    prob = np.maximum(pa, pb).astype(np.float32)
+    h_map = np.where(pa >= pb, np.where(pa > 0.5, thk, 0.0),
+                     np.where(pb > 0.5, thk - carve, 0.0))
+    r = contour_obb_on_plane(prob, K, plane, thk, h_map)
+    assert r is not None
+    ext = np.sort(r.extent)[::-1][:2]
+    assert abs(ext[0] - 0.200) < 0.0005, f"L={ext[0]*1000:.2f}mm"
+    assert abs(ext[1] - 0.055) < 0.0005, f"W={ext[1]*1000:.2f}mm"
+
+
+def test_contour_obb_returns_none_when_nothing_above_belt():
+    """실루엣은 있어도 전부 벨트 높이(h_min 미만)면 게이트가 다 버리고, 확률장
+    자체가 비어 있으면 애초에 등고선이 없다 — 두 경로 다 None 이어야 한다."""
+    K, plane, thk, prob, h_map = _synthetic_plate(0)[:5]
+    assert contour_obb_on_plane(prob, K, plane, thk,
+                                np.zeros_like(h_map)) is None
+    assert contour_obb_on_plane(np.zeros_like(prob), K, plane, thk,
+                                h_map) is None
