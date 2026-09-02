@@ -340,14 +340,22 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 | `/perception/detections` | `vision_msgs/Detection3DArray` | label, score, track ID, geometric OBB pose, size, covariance — in the camera optical frame reported by `camera_info` |
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
+| `/perception/odom` | `nav_msgs/Odometry` | one message per published object, `child_frame_id = obj_<id>`; pose as in detections, **twist in the object frame** (nav_msgs convention), angular velocity not estimated (covariance 1e3) — **on by default**, see below |
 | `/perception/points` | `sensor_msgs/PointCloud2` | per-object points of this frame's raw observation, coloured by track ID — **off by default**, see below |
 | `/perception/status` | `diagnostic_msgs/DiagnosticArray` | 입력 건강 하트비트, **1 Hz**. `status[0].name = roboworld_perception/input`, `hardware_id = rgbd_camera` |
+
+Each published object also gets a TF frame `obj_<id>` (parent: the camera
+optical frame), refreshed every frame.
 
 **Parameters** — `prompts`, `detect_interval` (5, SAM keyframe period),
 `max_per_prompt` (1, tracks per prompt), `csv_path`, `display`,
 `score_threshold` (0.4 — a new-track gate, *not* a publish gate; see below),
 `publish_score_min` (0.0 = off — the actual publish gate; see below),
 `publish_points` (false — see below),
+`publish_odom` (true — turns off `/perception/odom`; see Velocity and
+per-object TF),
+`publish_object_tf` (true — turns off the per-object `obj_<id>` TF frames;
+see Velocity and per-object TF),
 `publish_world_tf` (defaults to the `rviz` launch argument, so runs that open
 RViz enable it; never use this nominal, uncalibrated RViz-only TF as robot
 coordinates — the node warns when it publishes one — supply a calibrated
@@ -410,6 +418,36 @@ detections:
   bbox: {size: {x: 0.462, y: 0.529, z: 0.180}}
   id: black bag#2
 ```
+
+### Velocity and per-object TF
+
+`/perception/odom` and the `obj_<id>` TF frames exist for lead calculations:
+on a moving belt, an object's detected position is already stale by the time
+a gripper reaches it, and the fused per-track velocity lets a consumer
+predict where the object will be after a lead time `Δt`. Following
+`nav_msgs/Odometry` convention, `twist.linear` is reported in the object
+frame (`child_frame_id = obj_<id>`), not the camera optical frame — to get it
+in optical-frame coordinates, rotate by the same orientation `R` carried in
+the accompanying `pose.pose.orientation`: `v_optical = R · v_body`.
+`twist.angular` is always zero with covariance diagonal `1e3`, meaning
+angular velocity is not estimated. Both outputs are on by default
+(`publish_odom`, `publish_object_tf`); disable either with
+`publish_odom:=false` / `publish_object_tf:=false` on `perception.launch.py`.
+Neither has an empty form — on withdrawal, no `Odometry` message and no TF
+update is sent for that object — so a consumer must judge validity from
+`header.stamp` age rather than waiting for an explicit withdrawal;
+`/perception/detections` remains the source of truth for which objects are
+currently valid, since it degrades to an empty array on occlusion or
+staleness instead of going silent per object. Check both directly:
+
+```bash
+ros2 topic echo /perception/odom --once
+ros2 run tf2_ros tf2_echo camera_color_optical_frame obj_1
+```
+
+For example, to reach an object with a gripper `Δt` seconds from now,
+predict its optical-frame position as `p + R · v_body · Δt`, using the same
+`R` as above.
 
 ## Project structure
 
