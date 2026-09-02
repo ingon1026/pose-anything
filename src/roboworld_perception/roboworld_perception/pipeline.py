@@ -16,7 +16,8 @@ import numpy as np
 
 from .fusion import TrackFilter, pos_r_extra
 from .geometry import (MAX_THICKNESS, compute_obb, fit_plane,
-                       mask_depth_to_points, masked_depth_median, obb_on_plane)
+                       contour_obb_on_plane, mask_depth_to_points,
+                       masked_depth_median, obb_on_plane)
 from .tracker import IouTracker, depth_intrusion
 
 NOMINAL_DT = 1 / 15  # s — 공칭 프레임 주기 (스탬프 없을 때의 합성용)
@@ -313,7 +314,7 @@ class PerceptionPipeline:
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1, pub_score_min=0.0, enable_merge=True,
                  belt_plane=None, use_belt_plane=True,
-                 enable_footprint_gate=True):
+                 enable_footprint_gate=True, soft_footprint=False):
         self.detector = detector
         self.depth_scale = depth_scale
         # 이번 프레임에 _update_geometry 가 만든 점군 (track_id -> 점 배열).
@@ -323,6 +324,7 @@ class PerceptionPipeline:
         # 새로 생기지 않는다. 이번 프레임에 갱신 안 된 트랙(동결·침입 보류·
         # flow 실패)은 여기 없고, 그런 트랙은 호출자가 직접 계산해야 한다.
         self.frame_points = {}
+        self._frame_h = None      # soft_footprint 의 높이 맵 캐시 (프레임당 1회)
         self.rot_alpha = rot_alpha
         # "라벨당 트랙 수" 제한은 트래커의 새 트랙 생성에서만 건다
         # (검출 단계에서 자르면 score 역전 시 ID가 끊김)
@@ -344,6 +346,8 @@ class PerceptionPipeline:
         self._plane_tried = False
         # 부분 가림(풋프린트 절단) 게이트 — 위 FOOTPRINT_TAU 주석 참고
         self.enable_footprint_gate = enable_footprint_gate
+        # 스파이크(2026-09-02): 풋프린트를 확률장 등고선으로. 기본 off — 기존 경로 그대로.
+        self.soft_footprint = soft_footprint
         # 진단용 누적 카운터 — _reset_run_state() 가 아니라 여기 둔다.
         # reset() 으로 0 이 되면 "이번 런에서 몇 번 드롭됐나" 를 못 센다.
         self.late_frame_drops = 0
@@ -411,6 +415,7 @@ class PerceptionPipeline:
         가림 트랙의 obb는 마지막 정상값(stale)이다.
         """
         self.frame_points = {}
+        self._frame_h = None      # soft_footprint 의 높이 맵 캐시 (프레임당 1회)
         if stamp_s is None:
             stamp_s = (self._last_stamp or 0.0) + NOMINAL_DT
         elif self.time_reset_required(stamp_s):
@@ -516,6 +521,7 @@ class PerceptionPipeline:
         for track, det in pairs:
             track.now = stamp_s  # update가 만든 새 트랙 포함 — 여기서 일괄 주입
             track.mask = det["mask"]
+            track.prob = det.get("prob")   # 확률장 — soft_footprint 에서만 쓴다
             self._update_geometry(track, depth, K)
             out.append(track)
         # 이 프레임 필터가 갱신된 뒤에 중복을 판정한다 — 판정이 두 트랙의
@@ -552,6 +558,9 @@ class PerceptionPipeline:
                 continue
             dx, dy = flow
             track.mask = _shift_mask(track.mask, dx, dy)
+            if getattr(track, "prob", None) is not None:   # 마스크와 같은 평행이동
+                track.prob = cv2.warpAffine(track.prob, np.float32([[1, 0, dx], [0, 1, dy]]),
+                                            (track.prob.shape[1], track.prob.shape[0]))
             track.box = track.box + np.array([dx, dy, dx, dy])
             self._update_geometry(track, depth, K)
             out.append(track)
@@ -581,6 +590,23 @@ class PerceptionPipeline:
         obb = (obb_on_plane(points, self.belt_plane)
                if self.belt_plane is not None else None)
         constrained = obb is not None
+        if constrained and self.soft_footprint and getattr(track, "prob", None) is not None:
+            # 스파이크: 두께는 점군 분위수(위 obb) 그대로, 풋프린트·yaw·중심만 등고선으로.
+            # 등고선 점마다 자기 높이로 투사한다 — 단일 평면 투사가 Isaac 에서 두 번
+            # 틀린 경위(옆면 원근 팽창, 파인 블록 캡만 남음)는 contour_obb_on_plane
+            # docstring. 높이 맵(벨트 위 h)은 프레임당 한 번만 만든다.
+            if self._frame_h is None:
+                dm = depth * self.depth_scale
+                vv, uu = np.mgrid[0:dm.shape[0], 0:dm.shape[1]]
+                n_, d_ = self.belt_plane
+                self._frame_h = (((uu - K[0, 2]) * dm / K[0, 0]) * n_[0]
+                                 + ((vv - K[1, 2]) * dm / K[1, 1]) * n_[1]
+                                 + dm * n_[2] + d_)
+                self._frame_h[dm <= 0] = np.nan
+            obb2 = contour_obb_on_plane(track.prob, K, self.belt_plane, obb.extent[2],
+                                        self._frame_h, num_points=obb.num_points)
+            if obb2 is not None:
+                obb = obb2
         if constrained and obb.extent[2] > MAX_THICKNESS:
             # 물리적으로 불가능한 두께 = 마스크가 물체가 아닌 것을 잡았다.
             # 무구속으로 폴백하지 않고 이 프레임 관측을 통째로 버린다 — 같은

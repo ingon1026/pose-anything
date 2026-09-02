@@ -53,6 +53,9 @@ def generate_launch_description():
         # 그날 이전 동작으로 돌아간다.
         DeclareLaunchArgument("use_belt_plane", default_value="true"),
         DeclareLaunchArgument("enable_footprint_gate", default_value="true"),
+        # 스파이크(2026-09-02). SAM3 확률장 등고선으로 풋프린트를 재는 경로 —
+        # 기본 꺼짐, 근거는 geometry.contour_obb_on_plane docstring 참고.
+        DeclareLaunchArgument("soft_footprint", default_value="false"),
         DeclareLaunchArgument("image_size", default_value="0"),
         # 공칭 1m camera-above-belt TF는 로봇 좌표가 아니다. 실제 셀의
         # world/base 변환은 캘리브레이션된 외부 TF가 책임진다.
@@ -117,6 +120,8 @@ def generate_launch_description():
                 "enable_footprint_gate": ParameterValue(
                     LaunchConfiguration("enable_footprint_gate"),
                     value_type=bool),
+                "soft_footprint": ParameterValue(
+                    LaunchConfiguration("soft_footprint"), value_type=bool),
                 "image_size": ParameterValue(
                     LaunchConfiguration("image_size"), value_type=int),
                 "publish_world_tf": ParameterValue(

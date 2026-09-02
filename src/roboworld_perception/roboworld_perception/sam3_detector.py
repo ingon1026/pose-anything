@@ -118,11 +118,32 @@ class Sam3Detector:
             results = self.processor.post_process_instance_segmentation(
                 outputs, threshold=self.assoc_threshold,
                 mask_threshold=self.mask_threshold, target_sizes=target_sizes)[0]
+            # 확률장 — post_process 가 mask_threshold 로 이진화하기 직전의 값. 같은
+            # keep 을 재현한다(transformers 5.5.0 image_processing_sam3
+            # .post_process_instance_segmentation: scores = pred_logits.sigmoid()
+            # * presence.sigmoid(); keep = scores > threshold; pred_masks.sigmoid()[keep]
+            # 을 bilinear 보간). 부분화소 풋프린트용(geometry.contour_obb_on_plane).
+            # 순서·개수가 results 와 같아야 하므로 어긋나면 조용히 섞이기 전에 죽인다.
+            sc = outputs.pred_logits.sigmoid()
+            if getattr(outputs, "presence_logits", None) is not None:
+                sc = sc * outputs.presence_logits.sigmoid()
+            # ⚠ .float() 는 검출 0개일 때도 거쳐야 한다 — bf16 텐서는 numpy 로 못 간다
+            # (test4 손 가림 프레임에서 "unsupported ScalarType BFloat16" 로 죽었다,
+            # 2026-09-02. 플래그와 무관하게 여기를 지나므로 기본 경로도 같이 죽는다).
+            soft = outputs.pred_masks[0].sigmoid()[sc[0] > self.assoc_threshold].float()
+            if len(soft):
+                soft = torch.nn.functional.interpolate(
+                    soft[None], size=tuple(target_sizes[0]),
+                    mode="bilinear", align_corners=False)[0]
+            probs = soft.cpu().numpy()
+            assert len(probs) == len(results["masks"]), \
+                f"확률장 {len(probs)} != 마스크 {len(results['masks'])} — keep 재현이 틀렸다"
             detections.extend({
                 "label": label,
                 "mask": mask.cpu().numpy().astype(bool),
+                "prob": prob,
                 "box": box.float().cpu().numpy().astype(float),
                 "score": float(score),
-            } for mask, box, score in zip(results["masks"], results["boxes"],
-                                          results["scores"]))
+            } for mask, box, score, prob in zip(results["masks"], results["boxes"],
+                                                results["scores"], probs))
         return detections

@@ -90,6 +90,7 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" ; \
 # numpy/opencv 는 마스크·OBB 경로 전체가 탄다. 측정 조건을 고정한다면서
 # 이들을 띄워 두면 고정이 절반만 성립한다 — 호스트(측정이 돌던 곳) 값으로
 # 맞춘다. 위 네 개와 같은 이유다.
+# scikit-image 는 geometry.py contour_obb_on_plane 이 확률장 등고선(find_contours)에 쓴다 — 스파이크(2026-09-02). 호스트 실측 0.26.0.
 #
 # open3d 만 arm64 에서 출처가 다르다 — **PyPI 0.19.0 에 aarch64 휠이 없다.**
 # 상류 릴리스 자산에서 직접 받되, **한 pip 호출 안에서 변수로만 갈랐다.** 따로
@@ -116,7 +117,7 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" ; \
     fi ; \
     pip3 install --break-system-packages --ignore-installed \
     transformers==5.5.0 "$OPEN3D" \
-    numpy==2.5.0 scipy==1.17.1 opencv-python==4.13.0.92 pillow==12.1.1 \
+    numpy==2.5.0 scipy==1.17.1 scikit-image==0.26.0 opencv-python==4.13.0.92 pillow==12.1.1 \
     rosbags==0.11.3 \
     pytest==9.0.2
 # pytest 는 이미지 안에서 `pytest src/roboworld_perception/test -q` 로 설치를

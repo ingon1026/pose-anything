@@ -498,6 +498,98 @@ def obb_on_plane(points, plane, min_thickness=MIN_THICKNESS, top_q=0.98,
                      R=np.column_stack([e1, e2, n]), num_points=len(points))
 
 
+def contour_obb_on_plane(prob, K, plane, thk, h_map, iso=0.5, num_points=0,
+                         h_min=0.005):
+    """확률장 등고선으로 풋프린트를 재는 벨트 평면 OBB — obb_on_plane 의 부분화소 대안.
+
+    obb_on_plane 은 정수 화소 중심을 역투영해 minAreaRect 를 거므로 축마다 1px
+    짧고(위 docstring), 가장자리 depth 래스터가 0.79px 를 더 깎는다. 둘 다 "화소를
+    세는" 데서 오므로 처방은 부분화소 경계다(docs/subpixel_2026-08-25.md).
+
+    **위치는 확률장에서, 높이는 depth 에서.** SAM3 가 이진화 전에 내는 확률장의
+    iso 등고선(skimage find_contours, 부분화소)이 경계의 **화면 위치**를 주고, 각
+    등고선 점의 **높이**는 그 점 안쪽 3×3 의 실제 depth(h_map = 벨트 위 높이) 중앙값으로
+    잡아 점마다 **자기 높이 평면에 광선 투사**한다. hull_layer(기각) 와 달리 max
+    통계량이 아니라 경계 전체를 쓰므로 산발 화소 하나에 안 흔들린다.
+
+    Isaac 실측(2026-09-02)에서 단일 평면 투사가 두 번 틀려 이 형태가 됐다:
+    ① 등고선 전부를 상면 평면(thk)에 투사 → 화면 끝 블록(37° 사선)의 **옆면**이
+       상면 높이로 끌려 올라가 L +19~22. ② 높이 띠로 상면만 남기기 → **파인 블록**
+       (가운데가 폭 전체로 30mm 파임)은 실루엣이 한 높이가 아니라(끝 55·긴변 25)
+       양 끝 캡만 남아 L=56. 점마다 제 높이를 쓰면 둘 다 안 생긴다 — 현행 경로가
+       맞는 이유와 같은 이유다. 게이트는 h ≥ h_min(벨트 아님)뿐 — 마스크가 블록 사이
+       틈으로 새는 것을 자른다(게이트 없이 L +15).
+
+    ⚠ 스파이크. 기저·minAreaRect·center 는 obb_on_plane 과 같은 식을 일부러 복제했다.
+    채택되면 합칠 것. skimage 는 아직 저장소 핀에 없다.
+    """
+    from skimage.measure import find_contours
+    n, d = plane
+    prob = np.asarray(prob, dtype=np.float32)
+    # 게이트는 **필드가 아니라 점에** 건다. 확률장을 게이트 밖에서 0 으로 누르면
+    # marching squares 가 안쪽 화소(0.9)와 0 사이를 보간해 경계를 안쪽으로 당긴다 —
+    # 이웃의 참값(0.4)과 보간했어야 한다. 합성 0° 에서 −1.74mm(T2 발견), Isaac W
+    # −1.0mm(18행 유효 → 19행이 0 이 되어 18.44px, 참 18.79)가 전부 이것이었다
+    # (2026-09-02). 등고선은 순수 확률장에서 뜨고, 아래 안쪽 3×3 에 h ≥ h_min 화소가
+    # 없는 점(벨트·틈으로 샌 자리)만 버린다 — 누출은 잘리고 가장자리는 부분화소로 남는다.
+    inside = (prob > iso) & np.isfinite(h_map) & (h_map >= h_min)
+    cs = find_contours(prob, iso)
+    if not cs:
+        return None
+    # 둘러싼 면적이 가장 큰 등고선 — "가장 긴" 은 마우스처럼 굴곡진 물체에서 게이트가
+    # 만든 조각을 고른 적이 있다(desk2_em0 on run1: 49×32, 2026-09-02). 면적은 조각에
+    # 안 끌리고, 옆 물체로 샌 작은 덩어리도 합치지 않는다(신발끈 공식).
+    c = max(cs, key=lambda q: abs(np.dot(q[:, 0], np.roll(q[:, 1], 1))
+                                  - np.dot(q[:, 1], np.roll(q[:, 0], 1))))   # (N,2)=(row,col)
+    if len(c) < 20:
+        return None
+    H, W = prob.shape
+    # 점마다 **안쪽 법선 방향으로 0.75px 들어간 화소**로 판정·샘플한다. 3×3 창은
+    # 틈 쪽으로 1px 나간 점도 창 안에 물체 화소가 있어 살아남았다(Isaac L +4.95,
+    # 2026-09-02). 안쪽이 어느 쪽인지는 양쪽으로 0.75px 옮긴 확률 평균을 비교해 정한다.
+    tng = np.roll(c, -1, 0) - np.roll(c, 1, 0)
+    nrm = np.stack([tng[:, 1], -tng[:, 0]], 1)
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+    def _at(pts):
+        vv = np.clip(np.round(pts[:, 0]).astype(int), 0, H - 1)
+        uu = np.clip(np.round(pts[:, 1]).astype(int), 0, W - 1)
+        return vv, uu
+    vp, up = _at(c + 0.75 * nrm); vm, um = _at(c - 0.75 * nrm)
+    if prob[vp, up].mean() < prob[vm, um].mean():
+        vp, up = vm, um                         # 확률이 높은 쪽이 안쪽
+    ok0 = inside[vp, up]                        # 안쪽 화소가 물체 위(벨트 아님)여야 살린다
+    if not ok0.any():
+        return None                             # 전부 벨트 — 아래 nanmedian 이 all-NaN 경고를 내기 전에
+    # 높이는 그 안쪽 화소 주변 3×3 의 유효 중앙값 — 혼합 화소 하나에 안 흔들리게
+    hin = np.where(inside, h_map, np.nan)
+    vc = np.clip(vp, 1, H - 2); uc = np.clip(up, 1, W - 2)
+    win = np.stack([hin[vc + dv, uc + du] for dv in (-1, 0, 1) for du in (-1, 0, 1)], 1)
+    with np.errstate(all="ignore"):
+        h = np.nanmedian(win, axis=1)
+    ok = ok0 & np.isfinite(h)
+    if ok.sum() < 20:
+        return None
+    rays = np.linalg.inv(K) @ np.stack([c[ok, 1], c[ok, 0], np.ones(int(ok.sum()))])
+    denom = n @ rays                              # n 은 카메라 쪽(n_z<=0), 광선 +z → 음수
+    good = denom < -1e-6
+    t = (h[ok][good] - d) / denom[good]           # n·(t r) + d = h_i
+    pts = (rays[:, good] * t).T
+    if len(pts) < 20:
+        return None
+    u = np.cross(n, [1.0, 0.0, 0.0])
+    if np.linalg.norm(u) < 0.1:
+        u = np.cross(n, [0.0, 1.0, 0.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    uv = np.column_stack([pts @ u, pts @ v]).astype(np.float32)
+    (cu, cv), (su, sv), ang = cv2.minAreaRect(uv)
+    th = np.radians(ang)
+    e1 = np.cos(th) * u + np.sin(th) * v
+    e2 = -np.sin(th) * u + np.cos(th) * v
+    center = cu * u + cv * v + (thk / 2 - d) * n
+    return ObbResult(center=center, extent=np.array([su, sv, thk]),
+                     R=np.column_stack([e1, e2, n]), num_points=num_points)
+
 def match_axes(R_new, extent_new, R_prev):
     """Reorder/flip columns of R_new to best align with R_prev.
 
