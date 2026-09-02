@@ -35,22 +35,19 @@ RUN apt-get update && apt-get install -y \
 # apt 레이어 캐시를 건드리지 않기 위해서다.
 ARG TARGETARCH
 
-# ⚠ **빈 TARGETARCH 로 arm64 를 빌드하면 조용히 틀린 게 깔린다.** 2026-08-31 확인:
+# ⚠ **`TARGETARCH` 하나만 믿으면 arm64 에서 조용히 틀린 게 깔린다.** 2026-08-31 확인:
 # cu128 인덱스에 `torch-2.10.0+cu128-cp312-cp312-manylinux_2_28_aarch64.whl` 이
 # **있다.** 그래서 else 가지가 aarch64 에서 실패하지 않고 **CUDA 12.8 빌드를 성공적으로
 # 깐다** — CUDA 13.0 기계(GB10)에 맞지 않는 물건이다. 빌드는 그 뒤 open3d 에서야
 # 죽는데(PyPI 0.19.0 에 aarch64 휠이 없다), 그때 뜨는 오류는 open3d 를 지목하므로
 # **원인이 TARGETARCH 라는 것을 아무도 못 읽는다.** 핀을 의심하며 시간을 쓰게 되고,
 # 이 저장소에서 핀을 건드리는 것이 가장 위험한 행동이다(바로 아래 블록).
-# 그래서 여기서 이름을 대고 멈춘다 — run.sh 가 realsense2_camera 부재를 기동 전에
-# 알리는 것과 같은 기전이다. **위험한 조합에서만 멈춘다** — 빈 TARGETARCH 로도
-# amd64 는 else 가지가 정답이므로 기존 legacy 빌드를 깨지 않는다.
-RUN if [ -z "$TARGETARCH" ] && [ "$(uname -m)" = "aarch64" ]; then \
-      echo "TARGETARCH 가 비었는데 빌드 기계가 aarch64 다 — legacy builder(DOCKER_BUILDKIT=0)로 돌고 있다."; \
-      echo "이대로 두면 CUDA 12.8 휠이 깔리고 open3d 에서야 죽어 원인을 못 읽는다."; \
-      echo "BuildKit 으로 빌드할 것: DOCKER_BUILDKIT=1 docker build … / docker buildx build …"; \
-      exit 1 ; \
-    fi
+# (그 실패 양식 자체를 없앴다 — 아래 fallback 이 들어오기 전 얘기다.)
+# 그래서 아래 두 분기는 `TARGETARCH` 하나에 기대지 않고 **비었으면 기계에 직접
+# 묻는다** — `dpkg --print-architecture` 가 `TARGETARCH` 와 **같은 어휘**
+# (`amd64`/`arm64`)를 낸다(2026-09-01 확인). BuildKit 이면 `TARGETARCH` 가 그대로
+# 이기고, legacy builder 면 실제 기계로 떨어져 **arm64 legacy 빌드가 죽는 대신
+# 성공한다.** buildx 크로스빌드도 `TARGETARCH` 를 채우므로 fallback 을 안 탄다.
 
 # ⚠ torch / transformers / open3d 는 **고정한다.** 이 저장소의 성능·정확도
 # 수치는 전부 특정 조합에서 잰 값이고(docs/README.md §5 "측정 조건을 같이
@@ -73,7 +70,8 @@ RUN if [ -z "$TARGETARCH" ] && [ "$(uname -m)" = "aarch64" ]; then \
 # **올릴 때는 두 가지를 같이 올릴 것.** 한쪽만 올리면 조용히 갈라진다.
 # 그리고 **arm64 로 잰 값은 amd64 표와 같은 표에 넣지 말 것** — CUDA 층도 GPU 도
 # 다르므로 측정 조건이 다른 수치다(docs/README.md §5).
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" ; \
+    if [ "$ARCH" = "arm64" ]; then \
       pip3 install --break-system-packages \
         torch==2.10.0+cu130 torchvision==0.25.0+cu130 --index-url https://download.pytorch.org/whl/cu130 ; \
     else \
@@ -110,7 +108,8 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 # **만료 조건: arm64 수치를 문서에 한 줄이라도 기록하기 전에 해시를 뜰 것.** 그 순간
 # 이 휠은 측정 조건의 일부가 되고, 앵커 없이는 재빌드가 조건을 조용히 바꾼다. 그때는
 # 이미 빌드가 46MB 를 받은 뒤라 비용도 사실상 0 이다(`pip hash` 로 뜬다).
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" ; \
+    if [ "$ARCH" = "arm64" ]; then \
       OPEN3D=https://github.com/isl-org/Open3D/releases/download/main-devel/open3d-0.19.0-cp312-cp312-manylinux_2_35_aarch64.whl ; \
     else \
       OPEN3D=open3d==0.19.0 ; \
