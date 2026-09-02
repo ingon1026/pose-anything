@@ -48,6 +48,10 @@ def generate_launch_description():
         # a631ec0 이 그 중복을 없앤 뒤라 **이제 기전 자체가 없다**. 남는 비용은
         # 팩·직렬화이고 재측정은 안 했다. 기본 꺼짐.
         DeclareLaunchArgument("publish_points", default_value="false"),
+        # 물체별 속도(/perception/odom)·TF(obj_<track_id>) — 상시 기능이라
+        # points 와 달리 기본 켜짐. 노드 declare_parameter 기본값과 맞춘다.
+        DeclareLaunchArgument("publish_odom", default_value="true"),
+        DeclareLaunchArgument("publish_object_tf", default_value="true"),
         # 아래 둘은 2026-08-21 도입, 실측 근거는 docs/belt_plane_2026-08-21.md
         # 와 docs/footprint_gate_2026-08-21.md. 둘 다 기본 켜짐이고, 끄면
         # 그날 이전 동작으로 돌아간다.
@@ -115,6 +119,10 @@ def generate_launch_description():
                     LaunchConfiguration("enable_merge"), value_type=bool),
                 "publish_points": ParameterValue(
                     LaunchConfiguration("publish_points"), value_type=bool),
+                "publish_odom": ParameterValue(
+                    LaunchConfiguration("publish_odom"), value_type=bool),
+                "publish_object_tf": ParameterValue(
+                    LaunchConfiguration("publish_object_tf"), value_type=bool),
                 "use_belt_plane": ParameterValue(
                     LaunchConfiguration("use_belt_plane"), value_type=bool),
                 "enable_footprint_gate": ParameterValue(

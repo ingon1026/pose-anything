@@ -14,9 +14,11 @@ import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Point, TransformStamped
 from message_filters import ApproximateTimeSynchronizer, Subscriber
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from tf2_ros.transform_broadcaster import TransformBroadcaster
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import ColorRGBA, String
 from vision_msgs.msg import (Detection3D, Detection3DArray,
@@ -27,6 +29,7 @@ import cv2
 
 from .overlay import PALETTE, draw_objects, draw_status, show_window
 from .input_health import classify_input_health
+from .object_odometry import body_twist
 from .pipeline import (CSV_HEADER, POINT_DTYPE, PerceptionPipeline,
                        cloud_chunk, csv_row, img_to_np, parse_plane,
                        status_text)
@@ -146,6 +149,13 @@ class PerceptionNode(Node):
         # 프레임당 수백 KB 라 기본 꺼짐. 발행 대상은 Detection3DArray 와
         # 같은 publishable 게이트다(publish() 의 같은 루프에서 만든다).
         self.declare_parameter("publish_points", False)
+        # 물체별 속도(/perception/odom, nav_msgs/Odometry). 벨트가 움직이는
+        # 동안 로봇이 잡을 시점의 위치를 예측하려면 속도가 필수라 points 와
+        # 달리 기본 켜짐 — 상시 기능이다.
+        self.declare_parameter("publish_odom", True)
+        # 물체별 TF(obj_<track_id>). 이게 없으면 MoveIt/tf2 가 물체를 프레임
+        # 이름으로 조회하지 못한다. 기본 켜짐.
+        self.declare_parameter("publish_object_tf", True)
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic",
                                "/camera/camera/aligned_depth_to_color/image_raw")
@@ -309,6 +319,15 @@ class PerceptionNode(Node):
         self.pub_points = self.create_publisher(
             PointCloud2, "/perception/points", 10) \
             if self.get_parameter("publish_points").value else None
+        self.pub_odom = self.create_publisher(
+            Odometry, "/perception/odom", 10) \
+            if self.get_parameter("publish_odom").value else None
+        # StaticTransformBroadcaster(self._tf_bcast, world/optical 용)와는 다른
+        # 발행자다 — 저건 __init__ 에서 한 번 보내고 끝인 TRANSIENT_LOCAL
+        # latched 채널이고, 물체 TF는 프레임마다 위치가 바뀌므로 매 프레임
+        # 새로 보내는 일반 브로드캐스터가 있어야 한다.
+        self._obj_tf_bcast = TransformBroadcaster(self) \
+            if self.get_parameter("publish_object_tf").value else None
         self.pub_debug = self.create_publisher(Image, "/perception/debug_image", 10)
         self.pub_status = self.create_publisher(DiagnosticArray,
                                                 "/perception/status", 10)
@@ -402,6 +421,10 @@ class PerceptionNode(Node):
         nothing valid to say.  Clearing the markers alone only tidies up what
         a person watches in RViz - /perception/detections is what a robot
         reads, so they always go out together.
+
+        odom·물체 TF 는 철회 형태가 없어 그냥 끊긴다. 소비자는 header.stamp
+        나이로 걸러야 하고, "지금 유효한 물체"의 정본은 여전히
+        /perception/detections 다.
         """
         empty = Detection3DArray()
         empty.header.stamp = self.get_clock().now().to_msg()
@@ -600,6 +623,7 @@ class PerceptionNode(Node):
         # 사라진 것만 아래에서 골라 DELETE 한다.
         cur_marker_ids = set()
         chunks = []
+        obj_transforms = []
 
         stamp_s = stamp.sec + stamp.nanosec * 1e-9
         for obj in objects:
@@ -627,6 +651,37 @@ class PerceptionNode(Node):
             det.bbox.center = hyp.pose.pose
             det.bbox.size.x, det.bbox.size.y, det.bbox.size.z = o.extent
             det_array.detections.append(det)
+
+            if self.pub_odom is not None:
+                # 필터 속도(obj.filter.v)는 카메라 optical frame인데 nav_msgs
+                # 규약은 "twist 는 child_frame_id(물체 프레임) 기준"이다 —
+                # body_twist 가 그 변환과 6x6 공분산을 만든다(object_odometry
+                # 참고). P[:, 1, 1] 은 (3,2,2) 축별 [pos,vel] 공분산에서 축별
+                # 속도 분산만 뽑은 것.
+                v_body, twist_cov = body_twist(
+                    o.R, obj.filter.v, obj.filter.P[:, 1, 1])
+                odom = Odometry()
+                odom.header = det_array.header
+                odom.child_frame_id = f"obj_{obj.track_id}"
+                odom.pose = hyp.pose  # 둘 다 geometry_msgs/PoseWithCovariance
+                odom.twist.twist.linear.x, odom.twist.twist.linear.y, \
+                    odom.twist.twist.linear.z = v_body
+                # 각속도는 추정하지 않는다 — twist.twist.angular 는 0 그대로,
+                # 그 사실은 twist_cov 의 큰 대각(ANGULAR_VEL_UNKNOWN)이 싣는다.
+                odom.twist.covariance = twist_cov.tolist()
+                self.pub_odom.publish(odom)
+
+            if self._obj_tf_bcast is not None:
+                obj_tf = TransformStamped()
+                obj_tf.header = det_array.header
+                obj_tf.child_frame_id = f"obj_{obj.track_id}"
+                obj_tf.transform.translation.x, obj_tf.transform.translation.y, \
+                    obj_tf.transform.translation.z = o.center
+                obj_tf.transform.rotation.x = qx
+                obj_tf.transform.rotation.y = qy
+                obj_tf.transform.rotation.z = qz
+                obj_tf.transform.rotation.w = qw
+                obj_transforms.append(obj_tf)
 
             color = PALETTE[obj.track_id % len(PALETTE)]
             cube = Marker()
@@ -693,6 +748,12 @@ class PerceptionNode(Node):
         self.pub_markers.publish(markers)
         # 발행할 것이 없어도 보낸다 — 빈 점군이 "지금은 아무것도 없다" 다.
         self._publish_points(chunks, det_array.header)
+        if obj_transforms:
+            # 반드시 리스트로 한 번에 보낸다 — __init__ 의 StaticTransformBroadcaster
+            # 주석과 같은 이유다: sendTransform 을 물체마다 나눠 부르면 그때마다
+            # 새 TFMessage 가 나가고, 그 사이를 구독하는 소비자는 이번 프레임의
+            # 물체 중 일부만 담긴 트리를 잠깐 보게 된다.
+            self._obj_tf_bcast.sendTransform(obj_transforms)
 
         inst_fps = 1000.0 / max(proc_ms, 1e-3)
         self._fps_ema = inst_fps if self._fps_ema == 0 else \

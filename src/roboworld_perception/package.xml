@@ -14,6 +14,7 @@
   <depend>vision_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>message_filters</depend>
   <!-- perception_node.py 가 StaticTransformBroadcaster 를 런타임 임포트한다.
        ros-base 가 geometry2 로 항상 끌어오기 때문에 지금껏 안 드러났을 뿐이고,
