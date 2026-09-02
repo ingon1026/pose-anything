@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgl1 libgomp1
       - name: Install python deps
         # torch/SAM3 불필요 — geometry·tracker·pipeline 단위 테스트만 실행
-        run: pip install numpy scipy opencv-python-headless open3d pillow pytest pyyaml
+        run: pip install numpy scipy scikit-image opencv-python-headless open3d pillow pytest pyyaml
       - name: Run unit tests
         # ⚠ 여기서 안 도는 테스트가 있고, 로그의 skip 수로는 그 크기를 못 읽는다.
         #
