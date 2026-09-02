@@ -583,6 +583,7 @@ class PerceptionPipeline:
         발행이 멈춘다 — stale pose가 로봇에 도달하는 경로가 없다."""
         border = _touches_border(track.mask)
         if track.filter is None and border:
+            track.last_reject = "border"
             return  # 절단 관측으로 시드하지 않음 — 점군·OBB 계산(≈10ms)도 생략
         points = mask_depth_to_points(track.mask, depth, K,
                                       depth_scale=self.depth_scale)
@@ -618,10 +619,12 @@ class PerceptionPipeline:
             # 트랙이 두께 530mm 로 시드돼 중심이 265mm 틀린 채 8프레임 발행).
             # 관측이 없으면 신선도 타이머가 흘러 발행이 멈추고, 키프레임 SAM
             # 재검출은 그대로 살아 있어 마스크가 고쳐지면 자연 복구된다.
+            track.last_reject = "thickness"
             return
         if obb is None:
             obb = compute_obb(points)
         if obb is None:
+            track.last_reject = "no_obb"
             return
         log_ext = np.log(np.sort(obb.extent)[::-1] + 1e-9)
         if track.filter is None:
@@ -634,6 +637,7 @@ class PerceptionPipeline:
             # 발행), flow 프레임의 불일치 관측은 버린다.
             if self.last_was_keyframe:
                 self._seed_filter(track, obb, log_ext, constrained)
+            track.last_reject = "convention"
             return
         f = track.filter
         speed = float(np.linalg.norm(f.v))
@@ -658,6 +662,7 @@ class PerceptionPipeline:
             # 침입이 통과했다). 원하는 건 "덜 믿는다" 가 아니라 "이 프레임은
             # 안 본다" 이다. 관측이 없으면 신선도 타이머가 흘러 T_STALE 뒤
             # 발행이 멈추고, predict 가 P 를 키우므로 교착도 없다.
+            track.last_reject = "footprint"
             return
         if border:
             # 절단 마스크의 중심은 보이는 쪽으로 편향 — 편향을 불확실성으로
@@ -667,6 +672,7 @@ class PerceptionPipeline:
         # 바꾸지 않고, extent 재시드가 "이 프레임 마스크가 진짜 물체 위에
         # 있었는가"를 위치 수락으로 확인할 수 있게 된다.
         ok_pos = f.fuse_pos(obb.center, r_extra)
+        track.last_reject = None if ok_pos else "chi2"
         ok_ext = (f.fuse_extent(log_ext, self.last_was_keyframe and ok_pos)
                   if not border else False)
         if ok_pos:

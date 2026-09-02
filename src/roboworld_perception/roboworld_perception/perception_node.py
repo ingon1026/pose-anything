@@ -35,6 +35,7 @@ from .pipeline import (CSV_HEADER, POINT_DTYPE, PerceptionPipeline,
                        status_text)
 from .pose_covariance import published_pose_covariance
 from .sam3_detector import PROMPT_ALIASES, Sam3Detector, parse_prompts
+from .track_status import level_of, track_state
 
 # ponytail: manual Image<->numpy instead of cv_bridge (its binary is built
 # against numpy 1.x and may crash under the numpy 2.x in this env)
@@ -156,6 +157,10 @@ class PerceptionNode(Node):
         # 물체별 TF(obj_<track_id>). 이게 없으면 MoveIt/tf2 가 물체를 프레임
         # 이름으로 조회하지 못한다. 기본 켜짐.
         self.declare_parameter("publish_object_tf", True)
+        # 트랙 상태(/perception/tracks, diagnostic_msgs/DiagnosticArray). 가림과
+        # 소실을 구분 못 하는 소비자(XR 등)를 위해 추적기 내부 상태를 낸다.
+        # 상시 기능이라 기본 켜짐.
+        self.declare_parameter("publish_tracks", True)
         self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("depth_topic",
                                "/camera/camera/aligned_depth_to_color/image_raw")
@@ -322,6 +327,9 @@ class PerceptionNode(Node):
         self.pub_odom = self.create_publisher(
             Odometry, "/perception/odom", 10) \
             if self.get_parameter("publish_odom").value else None
+        self.pub_tracks = self.create_publisher(
+            DiagnosticArray, "/perception/tracks", 10) \
+            if self.get_parameter("publish_tracks").value else None
         # StaticTransformBroadcaster(self._tf_bcast, world/optical 용)와는 다른
         # 발행자다 — 저건 __init__ 에서 한 번 보내고 끝인 TRANSIENT_LOCAL
         # latched 채널이고, 물체 TF는 프레임마다 위치가 바뀌므로 매 프레임
@@ -425,6 +433,9 @@ class PerceptionNode(Node):
         odom·물체 TF 는 철회 형태가 없어 그냥 끊긴다. 소비자는 header.stamp
         나이로 걸러야 하고, "지금 유효한 물체"의 정본은 여전히
         /perception/detections 다.
+
+        /perception/tracks 도 빈 DiagnosticArray 를 낸다 — 입력이 죽어 트랙
+        상태 자체를 모르는 상황이므로 빈 것이 정직하다.
         """
         empty = Detection3DArray()
         empty.header.stamp = self.get_clock().now().to_msg()
@@ -437,6 +448,10 @@ class PerceptionNode(Node):
         # 빈 점군이 곧 회수다 — 안 보내면 리셋 뒤에도 RViz 에 옛 점군이
         # 남아 검출 토픽과 다른 것을 보여준다.
         self._publish_points([], empty.header)
+        if self.pub_tracks is not None:
+            tracks_msg = DiagnosticArray()
+            tracks_msg.header = empty.header
+            self.pub_tracks.publish(tracks_msg)
 
     def _reset_input_state(self, reason):
         """Forget observations and explicitly withdraw output after a reset."""
@@ -613,6 +628,24 @@ class PerceptionNode(Node):
             # at at most 1 Hz.
             self._publish_status()
 
+    def _track_status(self, t, state, reason, published):
+        """DiagnosticStatus 한 개 — /perception/tracks 의 트랙·dropped 공용 조립."""
+        status = DiagnosticStatus()
+        set_diagnostic_level(status, level_of(state))
+        status.name = f"{t.label}#{t.track_id}"
+        status.hardware_id = f"obj_{t.track_id}"
+        status.message = state
+        since = "nan" if t.last_accept_t is None else f"{t.now - t.last_accept_t:.2f}"
+        status.values = [
+            KeyValue(key="state", value=state),
+            KeyValue(key="reason", value=reason),
+            KeyValue(key="since_accept_s", value=since),
+            KeyValue(key="missed", value=str(t.missed)),
+            KeyValue(key="confirmed", value=str(t.confirmed).lower()),
+            KeyValue(key="published", value=str(published).lower()),
+        ]
+        return status
+
     def publish(self, objects, stamp, bgr, proc_ms, depth):
         det_array = Detection3DArray()
         det_array.header.stamp = stamp
@@ -624,11 +657,13 @@ class PerceptionNode(Node):
         cur_marker_ids = set()
         chunks = []
         obj_transforms = []
+        published_ids = set()  # /perception/tracks 의 "published" 판정용
 
         stamp_s = stamp.sec + stamp.nanosec * 1e-9
         for obj in objects:
             if not obj.publishable:  # 가림 중이거나 obb 없음 — stale pose 발행 금지
                 continue
+            published_ids.add(obj.track_id)
             o = obj.obb
             qx, qy, qz, qw = o.quat_xyzw
 
@@ -754,6 +789,23 @@ class PerceptionNode(Node):
             # 새 TFMessage 가 나가고, 그 사이를 구독하는 소비자는 이번 프레임의
             # 물체 중 일부만 담긴 트리를 잠깐 보게 된다.
             self._obj_tf_bcast.sendTransform(obj_transforms)
+
+        if self.pub_tracks is not None:
+            # 가림·소실을 구분 못 하는 소비자를 위한 진단 토픽 — publishable
+            # 여부와 무관하게 tracker 가 아는 트랙 전부를 낸다.
+            tracks_msg = DiagnosticArray()
+            tracks_msg.header.stamp = det_array.header.stamp
+            for t in self.pipeline.tracker.tracks:
+                state, reason = track_state(t, t.now)
+                tracks_msg.status.append(
+                    self._track_status(t, state, reason, t.track_id in published_ids))
+            for t in self.pipeline.tracker.dropped:
+                tracks_msg.status.append(
+                    self._track_status(t, "lost", t.last_reject or "none", False))
+            # 소비자 불변식 'lost 는 트랙당 한 번' — tracker.update() 는 키프레임에만 돌아
+            # dropped 를 거기서만 비우면 flow 프레임마다 같은 lost 가 반복된다(T7 지적). 발행했으니 비운다.
+            self.pipeline.tracker.dropped.clear()
+            self.pub_tracks.publish(tracks_msg)
 
         inst_fps = 1000.0 / max(proc_ms, 1e-3)
         self._fps_ema = inst_fps if self._fps_ema == 0 else \

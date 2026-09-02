@@ -120,6 +120,7 @@ class Track:
     area_ref: float | None = field(default=None, repr=False)
     n_accepted: int = 0        # 수락된 pose 관측 수 (M-of-N 승격용)
     last_accept_t: float | None = None  # 마지막 수락 시각 (신선도)
+    last_reject: str | None = None  # 마지막 관측 기각 사유 (/perception/tracks 용)
     now: float = 0.0           # 파이프라인이 매 프레임 주입하는 현재 시각
     pub_score_min: float = 0.0  # 발행 하한 (0=끔). 아래 publishable 참고
     _prev_rpy: np.ndarray | None = field(default=None, repr=False)
@@ -268,6 +269,9 @@ class IouTracker:
         self.enable_merge = enable_merge
         self._merge_runs = {}   # (id_lo, id_hi) -> (연속 성립 횟수, tau 이력)
         self.tracks: list[Track] = []
+        # 이번 update() 프레임에 삭제된 Track (merge_duplicates 포함) —
+        # 노드가 그 프레임에 lost 상태를 한 번 내보내기 위한 것.
+        self.dropped: list[Track] = []
         self._next_id = 1
 
     def reset(self):
@@ -337,6 +341,7 @@ class IouTracker:
             taken.update((lo_id, hi_id))
             dead.add(hi_id)                   # 승자 = 오래된(작은) id
         if dead:
+            self.dropped.extend(t for t in self.tracks if t.track_id in dead)
             self.tracks = [t for t in self.tracks if t.track_id not in dead]
         return dead
 
@@ -366,6 +371,7 @@ class IouTracker:
         관측의 pose 오염은 필터 게이트가 막으므로 여기서 막지 않는다.
         Returns list of (track, detection) pairs.
         """
+        self.dropped = []  # 이번 프레임 것만 — 노드가 매 프레임 읽는다
         if high_score is None:
             high, low = list(detections), []
         else:
@@ -432,6 +438,8 @@ class IouTracker:
                 t.missed += 1
                 if t.missed > self.max_missed:
                     t.frozen = True  # 동결: 유지하되 발행·전파 중단
+        self.dropped.extend(t for t in self.tracks
+                            if t.missed > self.max_missed + self.occlusion_hold)
         self.tracks = [t for t in self.tracks
                        if t.missed <= self.max_missed + self.occlusion_hold]
         return pairs

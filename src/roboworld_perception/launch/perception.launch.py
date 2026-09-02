@@ -52,6 +52,9 @@ def generate_launch_description():
         # points 와 달리 기본 켜짐. 노드 declare_parameter 기본값과 맞춘다.
         DeclareLaunchArgument("publish_odom", default_value="true"),
         DeclareLaunchArgument("publish_object_tf", default_value="true"),
+        # 트랙 상태(/perception/tracks) — 상시 기능이라 기본 켜짐. 노드
+        # declare_parameter 기본값과 맞춘다.
+        DeclareLaunchArgument("publish_tracks", default_value="true"),
         # 아래 둘은 2026-08-21 도입, 실측 근거는 docs/belt_plane_2026-08-21.md
         # 와 docs/footprint_gate_2026-08-21.md. 둘 다 기본 켜짐이고, 끄면
         # 그날 이전 동작으로 돌아간다.
@@ -123,6 +126,8 @@ def generate_launch_description():
                     LaunchConfiguration("publish_odom"), value_type=bool),
                 "publish_object_tf": ParameterValue(
                     LaunchConfiguration("publish_object_tf"), value_type=bool),
+                "publish_tracks": ParameterValue(
+                    LaunchConfiguration("publish_tracks"), value_type=bool),
                 "use_belt_plane": ParameterValue(
                     LaunchConfiguration("use_belt_plane"), value_type=bool),
                 "enable_footprint_gate": ParameterValue(
