@@ -341,6 +341,7 @@ ros2 topic pub --once /perception/prompt std_msgs/String "data: thermos"
 | `/perception/markers` | `visualization_msgs/MarkerArray` | OBB cube, XYZ axes, label text for RViz |
 | `/perception/debug_image` | `sensor_msgs/Image` | mask + 3D box + status overlay |
 | `/perception/odom` | `nav_msgs/Odometry` | one message per published object, `child_frame_id = obj_<id>`; pose as in detections, **twist in the object frame** (nav_msgs convention), angular velocity not estimated (covariance 1e3) — **on by default**, see below |
+| `/perception/tracks` | `diagnostic_msgs/DiagnosticArray` | one status per live track: `visible` / `held` / `pending` / `occluded` / `lost` plus a `reason` (`border`, `footprint`, `chi2`, …) — tells a consumer whether an object missing from `detections` is occluded or gone — **on by default**, see below |
 | `/perception/points` | `sensor_msgs/PointCloud2` | per-object points of this frame's raw observation, coloured by track ID — **off by default**, see below |
 | `/perception/status` | `diagnostic_msgs/DiagnosticArray` | 입력 건강 하트비트, **1 Hz**. `status[0].name = roboworld_perception/input`, `hardware_id = rgbd_camera` |
 
@@ -354,6 +355,8 @@ optical frame), refreshed every frame.
 `publish_points` (false — see below),
 `publish_odom` (true — turns off `/perception/odom`; see Velocity and
 per-object TF),
+`publish_tracks` (true — turns off `/perception/tracks`; see Track state —
+occluded vs. gone),
 `publish_object_tf` (true — turns off the per-object `obj_<id>` TF frames;
 see Velocity and per-object TF),
 `publish_world_tf` (defaults to the `rviz` launch argument, so runs that open
@@ -448,6 +451,47 @@ ros2 run tf2_ros tf2_echo camera_color_optical_frame obj_1
 For example, to reach an object with a gripper `Δt` seconds from now,
 predict its optical-frame position as `p + R · v_body · Δt`, using the same
 `R` as above.
+
+### Track state — occluded vs. gone
+
+`/perception/detections` never carries a stale pose — once a track's
+current-frame observation is rejected, the object simply drops out of the
+array, and that topic alone cannot say whether it is briefly occluded or
+actually gone. `/perception/tracks` (`diagnostic_msgs/DiagnosticArray`)
+exists to answer that: every frame it reports one `DiagnosticStatus` per
+**live** track, whether or not that track is currently in `/perception/detections`,
+plus a final `lost` status the frame a track is deleted. `name` is
+`<label>#<id>` and `hardware_id` is `obj_<id>`, matching the IDs used
+elsewhere; `message` carries the state string, and `level` mirrors it
+(`OK`=visible, `WARN`=held/pending, `ERROR`=occluded, `STALE`=lost).
+
+| State | Meaning | In `/perception/detections`? |
+|---|---|---|
+| `visible` | this frame's observation was accepted | yes, current pose |
+| `held` | observation rejected, but within `T_STALE` (0.5 s) | yes, last accepted pose |
+| `pending` | seen and fresh, but not yet publishable — not confirmed (needs 3 accepted observations), position uncertainty too high, or below the score gate | no — likely to appear soon |
+| `occluded` | beyond `T_STALE`, or the track is frozen | no — this is what looks like "disappeared" |
+| `lost` | track deleted this frame (final message) | no |
+
+`values` carries `state`, `reason`, `since_accept_s`, `missed`, `confirmed`,
+`published`. `reason` explains why *this frame's* observation was not used:
+`none`; `border` (mask touches the image edge — object partly out of frame);
+`footprint` (footprint gate — partial occlusion); `chi2` (observation
+rejected by the filter — an occluder intruding, or a look-alike);
+`thickness`; `no_obb`; `convention`; `unconfirmed`; `pos_std`; `score`. For
+`pending`, when no per-frame rejection applies, `reason` names the gate
+instead. As a rule of thumb: `occluded` with a small `since_accept_s` means
+wait, `pending` means the object is being seen but the filter has not yet
+promoted it — wait a few frames, `lost` means move on, and `held` means the
+pose already in `detections` is fresh enough to use but was not re-confirmed
+this frame. By construction, an object is in `/perception/detections`
+exactly when its state is `visible` or `held`. On input withdrawal,
+`/perception/tracks` publishes an empty `DiagnosticArray` — with no input,
+track state is unknown. Check it directly:
+
+```bash
+ros2 topic echo /perception/tracks --once
+```
 
 ## Project structure
 
