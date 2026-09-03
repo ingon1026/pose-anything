@@ -577,3 +577,12 @@ Isaac 브리지와 토픽이 충돌해 출력이 전량 폐기된다(§3-1, §5)
   파이프라인 내부는 CSV 의 `proc_ms` 로 볼 것
 - [belt_plane](belt_plane_2026-08-21.md) 의 "켜기 전에 필요한 검증" 절은
   **오전 판단 시점의 기록**이다. 같은 문서 "재평가" 절이 그것을 뒤집었다
+
+## 부록 — README 에서 옮긴 문서 (2026-09-02)
+
+| 문서 | 요지 |
+|---|---|
+| [install.md](install.md) | 요구사항 · Docker / 네이티브 / arm64(DGX Spark) · Isaac 동시 실행 함정 · 출하 전 회귀 게이트 · 프로젝트 구조. **README 원문 그대로** |
+| [ros2_interface.md](ros2_interface.md) | 토픽·파라미터 전부, `score_threshold` vs `publish_score_min`, `/perception/points` 비용, odom/TF 프레임 규약, tracks 다섯 상태. **README 원문 그대로** |
+
+> 이 절은 **파일 끝**에 둔다 — 위 본문의 줄번호(`docs/README.md:NNN`)를 다른 문서·코드가 참조하므로 앞에 끼우면 전부 밀린다.
