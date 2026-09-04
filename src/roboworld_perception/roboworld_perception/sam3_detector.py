@@ -36,6 +36,26 @@ def parse_prompts(s):
     return [p.strip() for p in s.split(",") if p.strip()]
 
 
+def _boxes_to_model(boxes_xyxy, original_size):
+    """원본 픽셀 xyxy 박스들 → SAM3 input_boxes 규약(정규화 [0,1] cxcywh).
+
+    transformers 5.5.0 processing_sam3.Sam3Processor._normalize_coordinates
+    (is_bounding_box=True) + box_xyxy_to_cxcywh 를 그대로 재현한다 — 이미지를
+    다시 프로세싱하지 않고 좌표만 변환하는 최단 경로다(processor 를
+    images 없이 original_sizes 만으로 부르는 경로도 같은 결과를 내지만,
+    여기서는 모델 없이도 단위 테스트 가능한 순수 함수로 뺀다).
+
+    boxes_xyxy: (N,4) 배열류, 원본 이미지 픽셀 좌표(x0,y0,x1,y1).
+    original_size: (H, W) — processor 의 original_sizes 항목과 같은 규약.
+    반환: (N,4) float32 numpy 배열, (cx,cy,w,h) ∈ [0,1].
+    """
+    h, w = original_size
+    b = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
+    x0, y0, x1, y1 = b[:, 0] / w, b[:, 1] / h, b[:, 2] / w, b[:, 3] / h
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return np.stack([cx, cy, x1 - x0, y1 - y0], axis=-1).astype(np.float32)
+
+
 class Sam3Detector:
     def __init__(self, model_id="facebook/sam3", device=None, threshold=0.4,
                  mask_threshold=0.5, dtype=torch.bfloat16, image_size=0,
@@ -94,10 +114,18 @@ class Sam3Detector:
         return self._text_cache[text]
 
     @torch.no_grad()
-    def detect(self, rgb: np.ndarray, prompts: list[str]) -> list[dict]:
+    def detect(self, rgb: np.ndarray, prompts: list[str], exemplars=None) -> list[dict]:
         """rgb: HxWx3 uint8. Returns [{label, mask(HxW bool), box(xyxy), score}].
 
         Vision embedding is computed once and reused across prompts.
+
+        exemplars: {라벨(prompts 원문) -> [(box_xyxy, 1|0), ...]} | None. 라벨에
+        항목이 있으면 그 프롬프트의 forward 에 in-image box exemplar 로 얹는다
+        (modeling_sam3.Sam3Model.forward: vision_embeds/text_embeds 와
+        input_boxes/input_boxes_labels 는 서로 배타적이지 않다 — XOR 은
+        pixel_values/vision_embeds 와 input_ids/text_embeds 사이에만 있다).
+        None 이거나 해당 라벨에 항목이 없으면 기존과 완전히 동일한 호출 —
+        회귀 없음.
         """
         image = Image.fromarray(rgb)
         img_inputs = self.processor(images=image, return_tensors="pt").to(self.device)
@@ -113,8 +141,23 @@ class Sam3Detector:
                 print(f"[경고] '{label}'은 별칭 테이블에 없는 한글 프롬프트입니다. "
                       f"SAM3는 영어 기반이라 검출이 안 될 수 있습니다 — "
                       f"영어로 입력하거나 PROMPT_ALIASES에 추가하세요.", flush=True)
-            outputs = self.model(vision_embeds=vision_embeds,
-                                 **self._text_inputs(text))
+            model_kwargs = dict(vision_embeds=vision_embeds, **self._text_inputs(text))
+            ex = exemplars.get(label) if exemplars else None
+            if ex:
+                cxcywh = _boxes_to_model([b for b, _ in ex], target_sizes[0])
+                labels = np.array([lb for _, lb in ex], dtype=np.int64)
+                # nn.Linear(4, hidden_size)로 바로 투영되므로(modeling_sam3
+                # Sam3GeometryEncoder.boxes_direct_project) 모델 dtype(GPU bf16)과
+                # 맞아야 한다 — pixel_values 와 같은 이유로 self.dtype 캐스팅.
+                input_boxes = torch.as_tensor(
+                    cxcywh, dtype=self.dtype, device=self.device)[None]
+                input_boxes_labels = torch.as_tensor(
+                    labels, dtype=torch.long, device=self.device)[None]
+                assert input_boxes.shape[:2] == input_boxes_labels.shape, \
+                    f"box/label 배치 불일치 {input_boxes.shape} vs {input_boxes_labels.shape}"
+                model_kwargs["input_boxes"] = input_boxes
+                model_kwargs["input_boxes_labels"] = input_boxes_labels
+            outputs = self.model(**model_kwargs)
             results = self.processor.post_process_instance_segmentation(
                 outputs, threshold=self.assoc_threshold,
                 mask_threshold=self.mask_threshold, target_sizes=target_sizes)[0]

@@ -63,6 +63,9 @@ def generate_launch_description():
         # 스파이크(2026-09-02). SAM3 확률장 등고선으로 풋프린트를 재는 경로 —
         # 기본 꺼짐, 근거는 geometry.contour_obb_on_plane docstring 참고.
         DeclareLaunchArgument("soft_footprint", default_value="true"),
+        # 키프레임마다 추적 중인 트랙의 박스를 SAM3 in-image box exemplar
+        # (positive)로 얹어 텍스트 프롬프트를 보강한다. 기본 꺼짐.
+        DeclareLaunchArgument("track_exemplars", default_value="false"),
         DeclareLaunchArgument("image_size", default_value="0"),
         # 공칭 1m camera-above-belt TF는 로봇 좌표가 아니다. 실제 셀의
         # world/base 변환은 캘리브레이션된 외부 TF가 책임진다.
@@ -135,6 +138,8 @@ def generate_launch_description():
                     value_type=bool),
                 "soft_footprint": ParameterValue(
                     LaunchConfiguration("soft_footprint"), value_type=bool),
+                "track_exemplars": ParameterValue(
+                    LaunchConfiguration("track_exemplars"), value_type=bool),
                 "image_size": ParameterValue(
                     LaunchConfiguration("image_size"), value_type=int),
                 "publish_world_tf": ParameterValue(

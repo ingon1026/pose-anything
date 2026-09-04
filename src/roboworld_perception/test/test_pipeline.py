@@ -68,6 +68,166 @@ def test_hybrid_calls_sam_only_on_keyframes():
     assert det.calls == 2  # 프레임 0, 5에만 SAM 호출
 
 
+class ExemplarStubDetector:
+    """detect() 에 실제로 넘어온 kwarg 를 그대로 기록하는 가짜 검출기.
+
+    StubDetector 와 마스크·박스 규약은 같다. 시그니처를 ``**kw`` 로 열어 두어
+    exemplars 인자가 전혀 안 오는지(꺼짐)와 무엇이 오는지(켜짐)를 함께
+    검증할 수 있다 — StubDetector 는 그 반대(안 오는 것을 못 받으면 즉시
+    TypeError)를 검증하는 용도로 그대로 둔다.
+    """
+    def __init__(self):
+        self.calls_kwargs = []
+
+    def detect(self, rgb, prompts, **kw):
+        self.calls_kwargs.append(kw)
+        mask = np.zeros(rgb.shape[:2], bool)
+        mask[100:160, 100:180] = True
+        return [{"label": "obj", "mask": mask,
+                 "box": np.array([100, 100, 180, 160], float), "score": 0.9}]
+
+
+def _exemplar_pipe(det):
+    """벨트 z=1.0 고정 + track_exemplars 켠 파이프라인 — 아래 세 테스트 공용."""
+    return PerceptionPipeline(det, detect_interval=5, track_exemplars=True,
+                              use_belt_plane=True,
+                              belt_plane=(np.array([0.0, 0.0, -1.0]), 1.0))
+
+
+def test_track_exemplars_off_calls_detect_without_exemplars_kwarg():
+    """꺼짐(기본)이면 기존과 완전히 동일하게 detect(rgb, prompts) 로 호출한다.
+
+    StubDetector 는 exemplars kwarg 를 아예 모르므로(TypeError), 조금이라도
+    새 kwarg 가 섞여 들어가면 이 테스트가 바로 죽는다 — 회귀 가드.
+    """
+    det = StubDetector()
+    pipe = PerceptionPipeline(det, detect_interval=5, track_exemplars=False)
+    depth = np.full((240, 320), 1000, np.uint16)
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(6):
+        pipe.process(rgb, depth, K, ["obj"])
+    assert det.calls == 2  # 프레임 0, 5
+
+
+def test_track_exemplars_on_passes_confirmed_track_box_as_positive():
+    """켜짐 + confirmed 트랙 있음 → 그 라벨의 박스가 positive exemplar 로 전달.
+
+    CONFIRM_N=3 은 키프레임 수락만 센다(test_material_time_reversal_...
+    주석 참고). detect_interval=5 의 키프레임은 프레임 idx 0,5,10,15 —
+    idx 10 처리 중에 3번째 수락이 일어나 confirmed 가 되므로, exemplar 가
+    반영된 첫 detect() 호출은 그 다음 키프레임(idx 15, 16번째 process 호출)
+    이다. 그래서 16 프레임을 돌리고 **마지막** 기록을 본다.
+    """
+    det = ExemplarStubDetector()
+    pipe = _exemplar_pipe(det)
+    depth = np.full((240, 320), 1000, np.uint16)
+    depth[100:160, 100:180] = 950
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(16):
+        pipe.process(rgb, depth, K, ["obj"])
+    assert pipe.tracker.tracks[0].confirmed
+    assert len(det.calls_kwargs) == 4          # 키프레임 idx 0,5,10,15
+
+    last_kw = det.calls_kwargs[-1]
+    assert "exemplars" in last_kw
+    boxes = last_kw["exemplars"]["obj"]
+    assert len(boxes) == 1
+    box, label = boxes[0]
+    assert label == 1
+    np.testing.assert_allclose(box, [100, 100, 180, 160], atol=2.0)
+    assert pipe.last_exemplars == 1
+
+
+def test_track_exemplars_excludes_frozen_tracks():
+    """동결된 트랙은 exemplar 후보에서 빠진다."""
+    det = ExemplarStubDetector()
+    pipe = _exemplar_pipe(det)
+    depth = np.full((240, 320), 1000, np.uint16)
+    depth[100:160, 100:180] = 950
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(16):
+        pipe.process(rgb, depth, K, ["obj"])
+    assert pipe.tracker.tracks[0].confirmed
+
+    pipe.tracker.tracks[0].frozen = True
+    # 다음 키프레임(idx 20)까지 5프레임(idx 16~20) 더 흘린다 — 동결 트랙은
+    # _track_frame 이 건드리지 않으므로 frozen 이 그대로 유지된다.
+    for _ in range(5):
+        pipe.process(rgb, depth, K, ["obj"])
+
+    assert len(det.calls_kwargs) == 5          # 다섯 번째 키프레임(idx 20)
+    last_kw = det.calls_kwargs[-1]
+    assert last_kw.get("exemplars") is None    # 동결 트랙만 있어 후보가 비었다
+    assert pipe.last_exemplars == 0
+
+
+def test_track_exemplars_excludes_track_with_last_reject():
+    """직전 관측이 게이트(chi2 등)에 기각된 트랙은 exemplar 후보에서 빠진다.
+
+    2026-09-04 A/B 실측(team-lead): track_exemplars 켜면 점수는 오르지만
+    가림 bag 에서 위치가 망가졌다(예: test4 keyboard center_std
+    [2.1 3.0 0.1]->[62.9 124.4 9.9]mm). 원인 중 하나는 직전에 이미
+    기각된(last_reject) 트랙의 낡은/의심스러운 박스를 그대로 positive
+    exemplar 로 밀어넣어 SAM3 프롬프트를 오염시킨 것 — 아래에서 last_reject
+    를 강제해 그 트랙이 후보에서 빠지는지만 본다.
+
+    frozen 테스트와 달리 5프레임을 한 번에 흘리지 않는다: last_reject 는
+    _track_frame 이 매 프레임 _update_geometry 로 다시 계산해 정상 관측이면
+    바로 None 으로 되돌아간다(frozen 처럼 그대로 유지되지 않는다). 그래서
+    키프레임(idx 20) 바로 앞에서만 강제한다.
+    """
+    det = ExemplarStubDetector()
+    pipe = _exemplar_pipe(det)
+    depth = np.full((240, 320), 1000, np.uint16)
+    depth[100:160, 100:180] = 950
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(16):
+        pipe.process(rgb, depth, K, ["obj"])
+    assert pipe.tracker.tracks[0].confirmed
+
+    for _ in range(4):                              # idx 16~19 — 아직 정상
+        pipe.process(rgb, depth, K, ["obj"])
+    pipe.tracker.tracks[0].last_reject = "chi2"      # 직전 관측 기각을 강제
+    pipe.process(rgb, depth, K, ["obj"])             # idx 20 — 키프레임
+
+    assert len(det.calls_kwargs) == 5
+    last_kw = det.calls_kwargs[-1]
+    assert last_kw.get("exemplars") is None
+    assert pipe.last_exemplars == 0
+    assert pipe.last_exemplars_skipped == 1
+
+
+def test_track_exemplars_excludes_track_under_depth_intrusion():
+    """가리개가 트랙 박스를 덮은(depth intrusion) 프레임은 exemplar 후보에서 빠진다.
+
+    2026-09-04 A/B 실측 원인 그대로: 손·검은 폴더가 트랙 박스를 덮은
+    키프레임에도 그 박스를 positive exemplar 로 넣으면 "이 박스 안이
+    물체다" 라고 SAM3 에 말하는 셈이 되어 가리개 위에 고점수 마스크가
+    나오고 관측이 오염된다. _track_frame 의 전파 보류(위)와 같은 술어
+    depth_intrusion 을 그대로 재사용해 막는다.
+    """
+    det = ExemplarStubDetector()
+    pipe = _exemplar_pipe(det)
+    depth = np.full((240, 320), 1000, np.uint16)
+    depth[100:160, 100:180] = 950
+    rgb = cv2.cvtColor(textured_frame(0), cv2.COLOR_GRAY2RGB)
+    for _ in range(16):
+        pipe.process(rgb, depth, K, ["obj"])
+    assert pipe.tracker.tracks[0].confirmed
+
+    occluded_depth = depth.copy()
+    occluded_depth[100:160, 100:180] = 500          # 가리개처럼 훨씬 가까움
+    for _ in range(4):                              # idx 16~19 — 아직 정상 depth
+        pipe.process(rgb, depth, K, ["obj"])
+    pipe.process(rgb, occluded_depth, K, ["obj"])    # idx 20 — 키프레임, 가림
+
+    assert len(det.calls_kwargs) == 5
+    last_kw = det.calls_kwargs[-1]
+    assert last_kw.get("exemplars") is None
+    assert pipe.last_exemplars == 0
+    assert pipe.last_exemplars_skipped == 1
+
+
 def test_plane_fit_is_attempted_only_once(monkeypatch):
     """지지면 추정은 검출이 처음 생긴 키프레임에서 한 번만 시도한다.
 

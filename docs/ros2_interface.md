@@ -41,6 +41,11 @@ camera-to-world/base TF externally instead),
 `use_sim_time` (false for normal camera/bag launches; `isaac.launch.py` sets it
 true for both perception and RViz)
 
+`track_exemplars` (false — 매 키프레임 확정·비동결 트랙의 박스를 SAM3 in-image box
+exemplar(positive)로 텍스트 프롬프트에 얹는다. 약한 프롬프트 점수는 오르지만
+가림 씬에서 위치 안정성이 나빠진다 — 그래서 **기본 off 유지**. 실측·원인은
+[exemplar_2026-09-04.md](exemplar_2026-09-04.md))
+
 `score_threshold` (0.4) is **not** a publish threshold. The detector itself
 returns everything above `min(0.1, score_threshold)`; the value only decides
 which detections are strong enough to *start a new track* (and which go to the

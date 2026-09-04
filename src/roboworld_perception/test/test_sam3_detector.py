@@ -14,7 +14,7 @@ import pytest
 pytest.importorskip("torch", reason="CI 는 torch 를 설치하지 않는다")
 
 from roboworld_perception.sam3_detector import (  # noqa: E402
-    TEXT_CACHE_MAX, Sam3Detector)
+    TEXT_CACHE_MAX, Sam3Detector, _boxes_to_model)
 
 
 class _Inputs(dict):
@@ -84,3 +84,22 @@ def test_eviction_keeps_the_newest():
         d._text_inputs(f"p{i}")
     assert f"p{TEXT_CACHE_MAX + 4}" in d._text_cache   # 마지막은 남고
     assert "p0" not in d._text_cache                   # 처음 것은 나갔다
+
+
+def test_boxes_to_model_matches_sam3_normalization_convention():
+    """transformers processing_sam3.Sam3Processor 의 _normalize_coordinates
+    (is_bounding_box=True) + box_xyxy_to_cxcywh 를 좌표만으로 재현한다 —
+    x 는 W, y 는 H 로 나누고 xyxy → cxcywh."""
+    # 640x480 프레임의 (64,96)-(192,288) 박스. cx=128/640=0.2, cy=192/480=0.4,
+    # w=128/640=0.2, h=192/480=0.4.
+    out = _boxes_to_model([[64, 96, 192, 288]], original_size=(480, 640))
+    assert out.shape == (1, 4)
+    np.testing.assert_allclose(out[0], [0.2, 0.4, 0.2, 0.4], atol=1e-6)
+
+
+def test_boxes_to_model_handles_multiple_boxes_independently():
+    boxes = [[0, 0, 640, 480], [64, 96, 192, 288]]
+    out = _boxes_to_model(boxes, original_size=(480, 640))
+    assert out.shape == (2, 4)
+    np.testing.assert_allclose(out[0], [0.5, 0.5, 1.0, 1.0], atol=1e-6)
+    np.testing.assert_allclose(out[1], [0.2, 0.4, 0.2, 0.4], atol=1e-6)

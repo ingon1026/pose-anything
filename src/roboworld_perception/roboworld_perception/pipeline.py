@@ -314,7 +314,8 @@ class PerceptionPipeline:
                  iou_threshold=0.3, max_missed=5, detect_interval=5,
                  max_per_prompt=1, pub_score_min=0.0, enable_merge=True,
                  belt_plane=None, use_belt_plane=True,
-                 enable_footprint_gate=True, soft_footprint=True):
+                 enable_footprint_gate=True, soft_footprint=True,
+                 track_exemplars=False):
         self.detector = detector
         self.depth_scale = depth_scale
         # 이번 프레임에 _update_geometry 가 만든 점군 (track_id -> 점 배열).
@@ -350,6 +351,15 @@ class PerceptionPipeline:
         # 사용자 결정.** 실기 정답 없이 켰다(W34 Try 2 "합성 결과로 채택 안 함" 을 알고 넘김).
         # 근거는 Isaac 정답 대비 W −8.2→+1.05 와 실기 3 bag 노이즈 동률·개선. False 면 옛 경로.
         self.soft_footprint = soft_footprint
+        # 키프레임마다 추적 중인 트랙의 2D 박스를 SAM3 in-image box exemplar
+        # (positive) 로 얹어 텍스트 프롬프트를 보강한다. 기본 꺼짐 — sam3_detector
+        # .detect() 의 exemplars 인자 참고.
+        self.track_exemplars = track_exemplars
+        # 진단용 — 마지막 키프레임에서 넘긴 exemplar 총 개수. late_frame_drops 와
+        # 같은 이유로 _reset_run_state() 가 아니라 여기 둔다.
+        self.last_exemplars = 0
+        # 진단용 — 가림·직전 기각을 이유로 후보에서 뺀 트랙 수 (아래 참고).
+        self.last_exemplars_skipped = 0
         # 진단용 누적 카운터 — _reset_run_state() 가 아니라 여기 둔다.
         # reset() 으로 0 이 되면 "이번 런에서 몇 번 드롭됐나" 를 못 센다.
         self.late_frame_drops = 0
@@ -473,7 +483,45 @@ class PerceptionPipeline:
         return out
 
     def _detect_frame(self, rgb, depth, K, prompts, stamp_s):
-        detections = self.detector.detect(rgb, prompts)
+        if self.track_exemplars:
+            # 가려지지 않고 확정된(M-of-N) 트랙만 — 동결·미확정 트랙의 박스는
+            # 신뢰할 수 없는 위치라 exemplar 로 쓰면 오히려 프롬프트를 오도한다.
+            #
+            # A/B 실측(2026-09-04, team-lead): 점수는 크게 오르지만(test2 water
+            # bottle 0.366->0.959 등) **가림 bag 에서 위치가 망가진다** —
+            # test4 keyboard center_std [2.1 3.0 0.1]->[62.9 124.4 9.9]mm.
+            # 원인: 손·폴더가 트랙 박스를 덮은 키프레임에도 그 박스를 그대로
+            # positive exemplar 로 넣어 "이 박스 안이 물체다" 라고 SAM3 에
+            # 말한 셈이 되고, SAM3 가 가리개 위에 고점수 마스크를 내 관측을
+            # 오염시킨다 — optical flow 드리프트와 같은 자기강화 실패 모드.
+            # 그래서 아래 두 조건을 추가로 건다:
+            #   - last_reject is not None: 직전 관측이 게이트(chi2·footprint·
+            #     border·thickness 등)에 막혔다는 뜻이라 지금 박스를 믿을 수
+            #     없다.
+            #   - depth_intrusion(...): _track_frame(위)과 같은 술어로, 현재
+            #     프레임 depth 가 트랙 상면보다 유의하게 가까우면(=가리개가
+            #     박스를 덮었으면) 제외한다.
+            ex = {}
+            skipped = 0
+            for t in self.tracker.tracks:
+                if t.frozen or not t.confirmed:
+                    continue
+                if t.last_reject is not None:
+                    skipped += 1
+                    continue
+                if t.mask is not None and t.filter is not None and depth_intrusion(
+                        t, masked_depth_median(t.mask, depth, self.depth_scale,
+                                               t.box)):
+                    skipped += 1
+                    continue
+                ex.setdefault(t.label, []).append((t.box, 1))
+            self.last_exemplars = sum(len(v) for v in ex.values())
+            self.last_exemplars_skipped = skipped
+            detections = self.detector.detect(rgb, prompts, exemplars=ex or None)
+        else:
+            self.last_exemplars = 0
+            self.last_exemplars_skipped = 0
+            detections = self.detector.detect(rgb, prompts)
         if self.use_belt_plane and self.belt_plane is None \
                 and not self._plane_tried:
             # 링은 반드시 **고점수 검출**로만 만든다. detect()는 연관용

@@ -157,6 +157,9 @@ def main():
     ap.add_argument("--raw", action="store_true",
                     help="평활 전 raw OBB를 {tag}_raw.csv로 추가 기록 "
                          "(측정 잡음 보정용 — 발행 CSV는 EMA·slerp 통과 후 값)")
+    ap.add_argument("--track-exemplars", action="store_true",
+                    help="키프레임마다 추적 중인 트랙의 박스를 SAM3 in-image box "
+                         "exemplar(positive)로 얹어 텍스트 프롬프트 보강 (기본 꺼짐)")
     args = ap.parse_args()
 
     from roboworld_perception.overlay import draw_objects, draw_status, show_window
@@ -179,7 +182,8 @@ def main():
         use_belt_plane=not args.no_belt_plane,
         enable_footprint_gate=not args.no_footprint_gate,
         soft_footprint=not args.no_soft_footprint,
-        belt_plane=parse_plane(args.belt_plane))
+        belt_plane=parse_plane(args.belt_plane),
+        track_exemplars=args.track_exemplars)
 
     writer = None
     rows = []
