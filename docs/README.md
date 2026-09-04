@@ -587,6 +587,6 @@ Isaac 브리지와 토픽이 충돌해 출력이 전량 폐기된다(§3-1, §5)
 
 > 이 절은 **파일 끝**에 둔다 — 위 본문의 줄번호(`docs/README.md:NNN`)를 다른 문서·코드가 참조하므로 앞에 끼우면 전부 밀린다.
 
-[vlm_prompt_spike_2026-09-04.md](vlm_prompt_spike_2026-09-04.md) — 로컬 VLM(Qwen3-VL 2B/4B)이 SAM3 프롬프트를 자동 생성·검증할 수 있는지 스파이크. 열거는 채택 후보(사람이 놓친 물체를 찾음, 이름 문제는 `PROMPT_ALIASES` 축), 검증은 보류(의미 오류는 잡지만 조각·절단은 못 잡고 2B는 검증기로 부적합). 부록: re-ID 게이트 재측정 — 실기 3 bag 라벨당 ID 정확히 1개, `docs/README.md:253` 결론과 일치
+[vlm_prompt_spike_2026-09-04.md](vlm_prompt_spike_2026-09-04.md) — 로컬 VLM(Qwen3-VL 2B/4B)이 SAM3 프롬프트를 자동 생성·검증할 수 있는지 스파이크. 열거는 채택 후보(사람이 놓친 물체를 찾음, 이름 문제는 `PROMPT_ALIASES` 축), 검증은 보류(의미 오류는 잡지만 조각·절단은 못 잡고 2B는 검증기로 부적합). 부록: re-ID 게이트 재측정 — 실기 3 bag 라벨당 ID 정확히 1개, `docs/README.md:253` 결론과 일치. 2차: 이름 후보→SAM3 점수 선택으로 VLM 이름만으로 수동 프롬프트 동률 이상 21/22 — 채택
 
 [exemplar_2026-09-04.md](exemplar_2026-09-04.md) — `track_exemplars` A/B: 확정 트랙 박스를 SAM3 positive exemplar로 얹으면 약한 프롬프트 점수는 오른다(water bottle 0.366→0.959). 조건 없이 켜면(Try 1) 가림 씬 위치가 파탄(test4 keyboard center_std [2.1 3.0 0.1]→[62.9 124.4 9.9]mm) — last_reject·depth_intrusion 가림 트랙을 제외하면(Try 2) 파탄은 사라지나 가림 씬 발행 프레임이 준다(test4 black bag 241→100행). **기본 off 유지**

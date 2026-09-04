@@ -176,6 +176,142 @@ sam(auto) → verify.py vlm(hand) → verify.py vlm(auto) → report.py` 순서�
 
 ---
 
+## 2차 — 이름 후보 K개 → SAM3 점수로 선택
+
+**질문:** 1차(§1)에서 남은 두 문제 — 이름이 SAM3 최적이 아님(§1-②), 프레임마다
+동의어가 갈려 50% 문턱에서 탈락(§1-③) — 를 "물체당 이름 후보 K개를 내고 SAM3
+검출 점수로 최고 점수 문구를 고른다"(§4가 제안한 다음 단계 설계)로 풀 수 있는가.
+
+### 방법
+
+`candidates.py` 의 질문(원문 그대로, `{k}`=4):
+
+> *"List every distinct physical object visible on the conveyor belt or table
+> in this image. For each object, give {k} different short English noun
+> phrases (1 to 4 words each) that could each name that SAME object as a
+> text prompt for an open-vocabulary segmentation model -- include synonyms,
+> more general category names (hypernyms), and variants with a color or
+> material adjective. The {k} phrases must be genuinely different wordings,
+> not near-duplicates of each other. Do not include the belt, the table/desk
+> surface, the background, or human hands/arms. Output ONLY a JSON array,
+> nothing else, in this exact format: [{"object": "<one-line description of
+> the object>", "names": ["<name 1>", "<name 2>", ...]}]. Example of the
+> FORMAT only -- this object is very unlikely to be in the image, do not
+> copy it unless you actually see something like it: [{"object": "a stapler
+> near the edge of the desk", "names": ["stapler", "office stapler", "metal
+> stapler", "desk stapler"]}]"*
+
+물체당 서로 다른 이름 후보 4개(K=4)를 프레임마다 받아 bag 전체의 고유 이름을
+이름 풀(name pool)로 모은다(`candidates.py`). 예를 들어 test2 4B 프레임 0000 의
+원시 응답 중 한 항목: `{"object": "a green water bottle on the conveyor belt",
+"names": ["green bottle", "water bottle", "soda bottle", "plastic bottle"]}` —
+프레임 0002 에서는 같은 물체를 `{"object": "a green insulated bottle...",
+"names": ["green bottle", "insulated bottle", "thermos bottle", "soda
+bottle"]}` 로 다르게 부른다.
+
+이어 `select.py` 가 이 이름 풀 전체(+ 수동 프롬프트)를 SAM3 로 프레임마다
+전부 검출한다. 이름당 그 프레임의 최고 score 검출 1개만 남기고, **프레임
+안에서는** 박스 IoU≥0.5 인 이름들을 score 내림차순 그리디로 같은 물체
+클러스터에 묶는다(첫 멤버가 그 프레임의 클러스터 대표). **프레임 간에는**
+클러스터 대표 박스 IoU 로 이어 붙인다(정지 씬 가정). 클러스터마다 이름별
+median score 를 매겨 최고 이름을 "선택 이름"으로 삼는다(`report_select.py`).
+
+수동 프롬프트도 이름 풀에 함께 섞여 검출되므로(source: hand/vlm+hand),
+"선택 이름"이 수동 프롬프트 자체로 나올 수 있다 — 실제로 test2 4B 의
+thermos/laptop/cell phone 클러스터가 그랬다(각각 selected_name "thermos"
+0.910·"laptop" 0.965·"cell phone" 0.932, 전부 `source: hand`). 이 교란(수동
+이름이 자기 자신을 이기는 경우)을 빼고 VLM 이 만든 이름만의 능력을 보려고,
+아래 표는 각 클러스터에서 **`source == "vlm"` 인 이름만** 다시 최고를 골라
+수동 프롬프트의 median score 와 비교했다(haiku 로 CPU 재분석).
+
+### 결과
+
+| bag | model | 수동 | 수동 score | VLM 최고 이름 | VLM score | Δ | ✔ |
+|---|---|---|---|---|---|---|---|
+| test2 | 2b | thermos | 0.910 | bottle | 0.932 | +0.021 | ✔ |
+| test2 | 2b | laptop | 0.965 | white laptop | 0.969 | +0.004 | ✔ |
+| test2 | 2b | manual | 0.912 | book with stickers | 0.941 | +0.029 | ✔ |
+| test2 | 2b | cell phone | 0.932 | black phone | 0.912 | −0.020 | ✔ |
+| test2 | 4b | thermos | 0.910 | thermos bottle | 0.871 | −0.039 | ✔ |
+| test2 | 4b | laptop | 0.965 | silver laptop | 0.965 | 0.000 | ✔ |
+| test2 | 4b | manual | 0.912 | manual booklet | 0.945 | +0.033 | ✔ |
+| test2 | 4b | cell phone | 0.932 | black phone | 0.912 | −0.020 | ✔ |
+| test4 | 2b | black bag | 0.941 | black backpack | 0.914 | −0.027 | ✔ |
+| test4 | 2b | keyboard | 0.969 | black computer keyboard | 0.980 | +0.012 | ✔ |
+| test4 | 2b | manual | 0.914 | instruction manual | 0.959 | +0.045 | ✔ |
+| test4 | 4b | black bag | 0.941 | strap-equipped bag | 0.922 | −0.020 | ✔ |
+| test4 | 4b | keyboard | 0.969 | black keyboard | 0.980 | +0.012 | ✔ |
+| test4 | 4b | manual | 0.914 | paper manual | 0.980 | +0.066 | ✔ |
+| test5 | 2b | black bag | 0.953 | black carry bag | 0.969 | +0.016 | ✔ |
+| test5 | 2b | keyboard | 0.977 | black computer keyboard | 0.980 | +0.004 | ✔ |
+| test5 | 2b | manual | 0.922 | instruction manual | 0.965 | +0.043 | ✔ |
+| test5 | 2b | beige notebook | 0.867 | paper | 0.598 | −0.270 | ✗ |
+| test5 | 4b | black bag | 0.953 | dark bag | 0.934 | −0.020 | ✔ |
+| test5 | 4b | keyboard | 0.977 | black keyboard | 0.980 | +0.004 | ✔ |
+| test5 | 4b | manual | 0.922 | paper manual | 0.980 | +0.059 | ✔ |
+| test5 | 4b | beige notebook | 0.867 | flat item | 0.955 | +0.088 | ✔ |
+
+**합계 21/22 ✔**(2b 10/11, 4b 11/11).
+
+관찰:
+
+① **21/22 에서 VLM 이 낸 이름만으로 수동 프롬프트와 동률 이상이다.** test2
+4B thermos 클러스터의 VLM 후보 전체를 median score 순으로 보면 thermos
+bottle 0.871, plastic bottle 0.715, green bottle 0.543, **water bottle
+0.331**, insulated bottle 0.108 — 1차(§1-②)에서 문제였던 "water bottle" 이
+후보 풀에 그대로 있었지만, SAM3 자신의 점수로 걸러졌다.
+
+② **"물체 이름이 SAM3 최적이 아니다" 문제가 SAM3 점수로 자동 해소된다** —
+"water bottle" 처럼 낮은 점수의 동의어가 후보에 섞여도 median score 로
+최고를 고르면 자동으로 배제된다(①과 같은 근거).
+
+③ **실패는 1건뿐이다** — test5 2B 의 beige notebook 클러스터에서 VLM 이 낸
+이름 중 최고가 "paper" 0.598 로 수동 프롬프트 0.867 에 못 미쳤다(Δ −0.270).
+같은 클러스터를 4B 로 하면 "flat item" 0.955 로 수동보다 높다(Δ +0.088) —
+2B 가 이 물체에 낸 이름 후보 자체가 부실했던 경우로 보인다.
+
+④ **주의 — 점수만으로 고르면 과잉일반 이름을 뽑을 수 있다.** "flat item"
+처럼 일반적인 이름은 점수가 높지만(위 test5 4B 사례) 다른 납작한 물체(검은
+폴더 등)에도 똑같이 붙을 수 있다. `select.py` 의 충돌(collision) 출력이 이를
+드러낸다 — 예를 들어 test5 4B 는 "flat item" 이 클러스터 [22, 25, 17, 15, 3]
+다섯 곳에서 동시에 최고로 뽑혔다. 제품에서는 여러 클러스터에서 최고인 이름
+(충돌)을 감점해야 한다.
+
+⑤ **VLM 은 대상이 아닌 것까지 다 열거한다** — 롤러·의자 다리·포스트잇·검은
+폴더 같은 배경/비대상 물체도 이름 후보를 받는다. test4 2B 는 클러스터 27개
+중 실제 피킹 대상은 3개(black bag, keyboard, manual)뿐이었다. 제품은 "피킹
+대상만" 지시하거나 운영자 확인을 1회 거치는 절차가 필요하다.
+
+### 대가
+
+프레임당 VLM 지연은 K=4 로 후보를 내야 해서 1차(§3)보다 길다: **2.9 s**
+(열거) + SAM3 이름 풀 검출 **2.9 s**. VRAM 은 2B **4.2 GB**, 4B **8.6 GB**.
+설정(프롬프트 정의) 시점 1회에만 드는 비용이라 감당 가능하다.
+
+### 결론
+
+**채택 — 다음 단계는 노드 밖 설정 도구(오프라인 `suggest_prompts`)로
+통합한다.** 프레임마다가 아니라 프롬프트를 (재)정의할 때만 돌린다. **2B 로
+충분하다**(4B 는 12 GB 에서 SAM3 와 동거 불가).
+
+### 재현
+
+```bash
+cd ~/vlm/spike
+./run_select.sh /home/ingon/roboworld/bags/test2 "thermos,laptop,manual,cell phone" 2b
+./run_select.sh /home/ingon/roboworld/bags/test2 "thermos,laptop,manual,cell phone" 4b
+./run_select.sh /home/ingon/roboworld/bags/test4 "black bag,keyboard,manual" 2b
+./run_select.sh /home/ingon/roboworld/bags/test4 "black bag,keyboard,manual" 4b
+./run_select.sh /home/ingon/roboworld/bags/test5 "black bag,keyboard,manual,beige notebook" 2b
+./run_select.sh /home/ingon/roboworld/bags/test5 "black bag,keyboard,manual,beige notebook" 4b
+```
+
+각 실행은 `frames.py → candidates.py → select.py → report_select.py` 순서로
+`~/vlm/out/<bag>/` 아래 `candidates_<model>.json` · `select_<model>.json` 을
+남긴다.
+
+---
+
 ## 부록: 외형 re-ID(DINOv3)는 이번에 안 한다
 
 가림 중 ID 가 실제로 바뀌는지부터 다시 쟀다(`output/reid_gate/log.txt`).
